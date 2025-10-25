@@ -1,4 +1,7 @@
 
+tests/
+flash_attn-2.8.1+cu12torch2.8cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
+
 **/*.pt
 **/checkpoints
 **/wget-log
