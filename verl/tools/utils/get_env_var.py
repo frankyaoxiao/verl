@@ -1,5 +1,4 @@
-# Copyright 2023-2024 SGLang Team
-# Copyright 2025 ModelBest Inc. and/or its affiliates
+# Copyright 2025 Bytedance Ltd. and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .swebench_sandbox import SWEbenchSandboxTool
+from __future__ import annotations
 
-__all__ = ["SWEbenchSandboxTool"]
+import os
+from typing import Any
+
+
+def get_env_var(name: str, default: Any = None) -> Any:
+    """Small helper to fetch environment variables with optional defaults."""
+
+    return os.environ.get(name, default)
+
+
+__all__ = ["get_env_var"]

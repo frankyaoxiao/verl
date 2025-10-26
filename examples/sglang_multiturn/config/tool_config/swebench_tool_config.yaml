@@ -1,0 +1,27 @@
+tools:
+  - class_name: "verl.tools.swebench_sandbox.SWEbenchSandboxTool"
+    config:
+      type: native
+      docker_image: "swebench/base:latest"
+      workdir: "/workspace"
+      repo_cache: "~/swebench_repo_cache"
+      timeout_seconds: 900
+      log_dir: "~/verl_swebench_logs"
+      dry_run: true
+    tool_schema:
+      type: "function"
+      function:
+        name: "run_swebench_tests"
+        description: |
+          Apply a unified diff to the repository and execute the SWEbench evaluation harness.
+          Returns pass/fail status and execution logs.
+        parameters:
+          type: "object"
+          properties:
+            patch:
+              type: "string"
+              description: "Unified diff to apply."
+            notes:
+              type: "string"
+              description: "Optional rationale or metadata."
+          required: ["patch"]
