@@ -48,4 +48,6 @@ export SWEBENCH_MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH}
   data.val_max_samples=${VAL_MAX_SAMPLES} \
   data.max_prompt_length=${MAX_PROMPT_LENGTH} \
   data.max_response_length=${MAX_RESPONSE_LENGTH} \
+  actor_rollout_ref.rollout.prompt_length=${MAX_PROMPT_LENGTH} \
+  actor_rollout_ref.rollout.response_length=${MAX_RESPONSE_LENGTH} \
   actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH}
