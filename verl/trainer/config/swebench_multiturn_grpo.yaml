@@ -8,11 +8,14 @@ defaults:
   - _self_
 
 data:
-  train_files: ${oc.env:SWEBENCH_TRAIN,~/data/swebench_mini/rl/train.parquet}
-  val_files: ${oc.env:SWEBENCH_VAL,~/data/swebench_mini/rl/val.parquet}
+  train_files: ${oc.env:SWEBENCH_TRAIN,${oc.env:HOME}/data/swebench_mini/rl/train.parquet}
+  val_files: ${oc.env:SWEBENCH_VAL,${oc.env:HOME}/data/swebench_mini/rl/val.parquet}
   max_prompt_length: 4096
   max_response_length: 1024
   return_raw_chat: True
+  train_batch_size: ${oc.env:SWEBENCH_TRAIN_BATCH_SIZE,1024}
+  train_max_samples: ${oc.env:SWEBENCH_TRAIN_MAX_SAMPLES,-1}
+  val_max_samples: ${oc.env:SWEBENCH_VAL_MAX_SAMPLES,-1}
 
 algorithm:
   adv_estimator: grpo
@@ -29,7 +32,7 @@ actor_rollout_ref:
       model_dtype: bf16
     optim:
       lr: 5e-7
-    ppo_mini_batch_size: 8
+    ppo_mini_batch_size: ${oc.env:SWEBENCH_PPO_MINI_BATCH,8}
     ppo_micro_batch_size_per_gpu: 1
     use_dynamic_bsz: True
   rollout:

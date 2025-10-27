@@ -374,6 +374,13 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=Tr
         dataset_cls = RLHFDataset
     print(f"Using dataset class: {dataset_cls.__name__}")
 
+    # Cast max_samples to int if it arrived as a string (e.g., from CLI/env overrides)
+    if isinstance(max_samples, str):
+        try:
+            max_samples = int(max_samples)
+        except ValueError as exc:  # pragma: no cover - config bug
+            raise ValueError(f"Invalid max_samples value: {max_samples}") from exc
+
     # Instantiate the dataset using the determined dataset class
     dataset = dataset_cls(
         data_files=data_paths,
