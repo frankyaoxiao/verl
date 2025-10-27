@@ -1,0 +1,5 @@
+name: swebench-conda
+version: 0.1.0
+dockerfile: Dockerfile
+start:
+  command: bash -lc "echo 'SWEbench template ready'"

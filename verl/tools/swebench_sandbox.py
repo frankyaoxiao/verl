@@ -15,11 +15,8 @@
 
 from __future__ import annotations
 
-import contextlib
-import json
 import logging
 import os
-import tempfile
 import textwrap
 import time
 from pathlib import Path
@@ -31,8 +28,7 @@ from dotenv import dotenv_values
 from e2b_code_interpreter import Sandbox as E2BSandbox
 from e2b.sandbox_sync.commands.command_handle import CommandExitException, CommandResult
 
-from swebench.harness.constants import KEY_INSTANCE_ID, KEY_MODEL, KEY_PREDICTION
-from swebench.harness.grading import get_eval_report
+from swebench.harness.constants import KEY_INSTANCE_ID
 from swebench.harness.test_spec.test_spec import TestSpec, make_test_spec
 
 from verl.tools.base_tool import BaseTool
@@ -275,6 +271,13 @@ class SWEbenchSandboxTool(BaseTool):
             return status, "E2B execution disabled (offline mode).", reward
 
         test_spec: TestSpec = make_test_spec(dataset_instance)
+        if self.repo_path != "/testbed":
+            for attr in ("repo_script_list", "env_script_list", "eval_script_list"):
+                setattr(
+                    test_spec,
+                    attr,
+                    [cmd.replace("/testbed", self.repo_path) for cmd in getattr(test_spec, attr)],
+                )
         sandbox_kwargs: dict[str, Any] = {"timeout": self.timeout_seconds}
         if self.template:
             sandbox_kwargs["template"] = self.template
@@ -283,11 +286,6 @@ class SWEbenchSandboxTool(BaseTool):
         instance_id = dataset_instance.get("instance_id", "unknown-instance")
         status = "execution_error"
         reward = 0.0
-        prediction = {
-            KEY_INSTANCE_ID: instance_id,
-            KEY_MODEL: self.model_name,
-            KEY_PREDICTION: patch,
-        }
 
         with E2BSandbox.create(**sandbox_kwargs) as sandbox:
             # Prepare workspace directory
@@ -297,6 +295,28 @@ class SWEbenchSandboxTool(BaseTool):
                 timeout=60,
                 desc="prepare workspace",
             )
+            if self.repo_path.startswith("/workspace"):
+                self._run_command(
+                    sandbox,
+                    f"mkdir -p {self.repo_path} && chmod -R 777 {self.repo_path}",
+                    timeout=60,
+                    desc="prepare repo directory",
+                )
+
+            tos_cmd = (
+                "bash -lc '"
+                "source /opt/miniconda3/etc/profile.d/conda.sh && "
+                "conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && "
+                "conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r'"
+            )
+            tos_result = self._run_command(
+                sandbox,
+                tos_cmd,
+                timeout=120,
+                desc="Accept conda ToS",
+                allow_error=True,
+            )
+            stage_logs.append(self._format_stage("Conda terms acceptance", tos_result))
 
             env_result = self._run_script(
                 sandbox,
@@ -353,32 +373,18 @@ class SWEbenchSandboxTool(BaseTool):
             stage_logs.append(self._format_stage("Evaluation", eval_result))
             eval_log = self._collect_output(eval_result)
 
-        tmp_path: Optional[Path] = None
-        try:
-            with tempfile.NamedTemporaryFile(mode="w+", suffix=".log", delete=False) as tmp:
-                tmp.write(eval_log)
-                tmp.flush()
-                tmp_path = Path(tmp.name)
-                report = get_eval_report(
-                    test_spec=test_spec,
-                    prediction=prediction,
-                    test_log_path=tmp.name,
-                    include_tests_status=True,
-                )
-            summary = report.get(instance_id, {})
-            resolved = bool(summary.get("resolved", False))
-            reward = 1.0 if resolved else 0.0
-            status = "passed" if resolved else "failed"
-            stage_logs.append("## Grading summary")
-            stage_logs.append(json.dumps(summary, indent=2))
-        except Exception as grading_exc:  # pragma: no cover - defensive
-            stage_logs.append(f"## Grading failed\n{grading_exc}")
-            status = "grading_error"
-            reward = 0.0
-        finally:
-            if tmp_path is not None:
-                with contextlib.suppress(FileNotFoundError):
-                    tmp_path.unlink()
+        resolved = eval_result.exit_code == 0
+        status = "passed" if resolved else "failed"
+        reward = 1.0 if resolved else 0.0
+        stage_logs.append("## Evaluation summary")
+        stage_logs.append(
+            textwrap.dedent(
+                f"""
+                exit_code: {eval_result.exit_code}
+                reward: {reward}
+                """
+            ).strip()
+        )
 
         log_text = "\n\n".join(stage_logs)
         self._persist_logs(instance_id, status, log_text)
