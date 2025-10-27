@@ -1,13 +1,13 @@
 tools:
   - class_name: "verl.tools.swebench_sandbox.SWEbenchSandboxTool"
-    config:
+    config: 
       type: native
       docker_image: "swebench/base:latest"
       workdir: "/workspace"
       repo_cache: "~/swebench_repo_cache"
       timeout_seconds: 900
       log_dir: "~/verl_swebench_logs"
-      dry_run: true
+      enable_e2b: false
     tool_schema:
       type: "function"
       function:

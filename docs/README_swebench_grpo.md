@@ -98,8 +98,7 @@ Last updated: 2025-10-25
   }
   ```
 - Support streaming of multiple tool calls per conversation (apply patch, run tests, revise patch).
-  - Implementation delegates to `swebench.harness` utilities (`build_env_images`, `run_instance`) to reuse the official Docker build/evaluation pipeline.
-  - Configuration supports a `dry_run` flag (enabled in tests/examples) that skips Docker execution and returns placeholder logs, making the tool testable on machines without Docker.
+- Implementation invokes E2B sandboxes by default. For lightweight/offline tests you can set `enable_e2b=false` in the tool config; in that mode the tool performs structural checks (patch applies cleanly, optional compile) and awards reward `1` only when the patch exactly matches the reference diff.
 - Support streaming of multiple tool calls per conversation (apply patch, run tests, revise patch).
 
 ### Interaction Hook (Optional)
@@ -171,35 +170,29 @@ Last updated: 2025-10-25
 6. **Mini GRPO run** → launch config on mini dataset; analyze reward curve and validation metrics.
 7. **Scale decisions** → expand dataset/model, tune hyperparameters, add partial reward shaping if desired.
 
-## Immediate Task Breakdown
+## Status & Next Steps (2025-10-27)
 
-1. **Dataset Ingestion**
-   - Implement `recipe/swebench/create_dataset.py` mirroring GSM8K script.
-   - Load `MariusHobbhahn/swe-bench-verified-mini` (`split="test"`), emit train/val parquet with style-3 prompt structure.
-   - Include unit test to validate schema and presence of `tools_kwargs`.
+- ✅ Dataset converter (`recipe/swebench/create_dataset.py`) emits verl-format parquet; unit tests cover prompt/tools metadata.
+- ✅ SWEbench tool (`verl/tools/swebench_sandbox.py`) now executes patches via **E2B code-interpreter** sandboxes with structural fallback when `enable_e2b=false`.
+- ✅ Tool config (`examples/sglang_multiturn/config/tool_config/swebench_tool_config.yaml`) defaults to `enable_e2b=false` for deterministic tests; flip to `true` with a valid `E2B_API_KEY` for real execution.
+- ✅ Smoke script (`tests/special_e2e/ppo_trainer/run_swebench_smoke.sh`) runs dataset prep + optional GRPO step.
+- 🔄 TODO: implement full SWEbench harness invocation inside the E2B sandbox (install deps, run judge) and add live integration test once resource budget confirmed.
+- 🔄 TODO: Bench runtime/cost of E2B execution and decide on caching strategy or custom template.
 
-2. **Docker Environment Setup**
-   - Build local SWEbench base image (Dockerfile derived from official harness).
-   - Create helper script to launch container, mount repo cache, run judge command, and teardown.
-   - Document prerequisites (Docker version, disk space, env vars) in README.
+### Immediate Task Breakdown
 
-3. **Tool Implementation**
-   - Add `verl/tools/swebench_tool.py` with create/execute/release hooks calling Docker helper.
-   - Define OpenAI tool schema + config entry under `examples/sglang_multiturn/config/tool_config/swebench_tool_config.yaml`.
-   - Extend `SWEbenchInteraction` if we want automated coaching.
+1. **E2B Harness Integration**
+   - Extend `_evaluate_patch` to install SWEbench requirements in the sandbox and run the official evaluation script instead of the current `compileall` placeholder.
+   - Consider creating a custom E2B template seeded with dependencies to minimize per-run setup.
 
-4. **Training Config & Smoke Test**
-   - Copy config template to `examples/sglang_multiturn/config/swebench_multiturn_grpo.yaml` (OLMo 7B).
-   - Write `tests/special_e2e/ppo_trainer/run_swebench_smoke.sh` mirroring char-count script.
-   - Ensure script performs dataset prep, sandbox warmup (`docker pull/build`), and a short GRPO run (e.g., 5 steps).
+2. **Live Validation**
+   - Add an integration test (or smoke flag) that runs a single known SWEbench instance through E2B to confirm end-to-end behaviour.
+   - Capture logs/metrics for debugging (store under `~/verl_swebench_logs`).
 
-5. **Validation Harness**
-   - Add integration test that runs tool against known SWEbench instance and checks for reward=1.
-   - Set up logging hooks / telemetry (Ray timeline, tool output dumps).
+3. **Training Loop Enablement**
+   - Flip `enable_e2b` to `true` in the tool config and update `run_swebench_smoke.sh` to demonstrate a real (short) GRPO run once the harness path is stable.
+   - Monitor cost/latency; adjust batch sizes or sampling if needed.
 
-6. **Documentation & Ops**
-   - Update README with usage instructions, environment setup, troubleshooting tips.
-   - Track open questions (turn limits, caching policy) and resolve before scaling.
 
 ## Open Questions for Confirmation
 
