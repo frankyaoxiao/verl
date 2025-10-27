@@ -10,8 +10,8 @@ defaults:
 data:
   train_files: ${oc.env:SWEBENCH_TRAIN,${oc.env:HOME}/data/swebench_mini/rl/train.parquet}
   val_files: ${oc.env:SWEBENCH_VAL,${oc.env:HOME}/data/swebench_mini/rl/val.parquet}
-  max_prompt_length: 4096
-  max_response_length: 1024
+  max_prompt_length: ${oc.env:SWEBENCH_MAX_PROMPT_LENGTH,4096}
+  max_response_length: ${oc.env:SWEBENCH_MAX_RESPONSE_LENGTH,1024}
   return_raw_chat: True
   train_batch_size: ${oc.env:SWEBENCH_TRAIN_BATCH_SIZE,1024}
   train_max_samples: ${oc.env:SWEBENCH_TRAIN_MAX_SAMPLES,-1}
