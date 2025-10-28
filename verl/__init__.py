@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ctypes
 import importlib
 import logging
 import os
@@ -24,6 +25,30 @@ from .protocol import DataProto
 from .utils.device import is_npu_available
 from .utils.import_utils import import_external_libs
 from .utils.logging_utils import set_basic_config
+
+
+def _allow_ptrace_any():
+    """Workaround for environments with restrictive seccomp profiles.
+
+    Some SGLang weight-update paths rely on ``pidfd_getfd`` which in turn
+    requires ptrace permissions. Attempt to relax the restriction so CUDA
+    tensors can be shared across processes. If this fails we silently
+    continue; the downstream code will surface the original error.
+    """
+    try:
+        PR_SET_PTRACER = 0x59616D61
+        PR_SET_PTRACER_ANY = ctypes.c_int(-1)
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        res = libc.prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0)
+        if res != 0:
+            # Best-effort; leave a breadcrumb in debug logs if available.
+            err = ctypes.get_errno()
+            logging.getLogger(__name__).debug("prctl(PR_SET_PTRACER) failed with errno %s", err)
+    except Exception:  # pragma: no cover - defensive
+        logging.getLogger(__name__).debug("prctl(PR_SET_PTRACER) workaround not applied", exc_info=True)
+
+
+_allow_ptrace_any()
 
 version_folder = os.path.dirname(os.path.join(os.path.abspath(__file__)))
 
