@@ -224,15 +224,27 @@ class AsyncRolloutRequest(BaseModel):
     @staticmethod
     def _handle_apply_chat_template(
         processing_class: PreTrainedTokenizer | PreTrainedTokenizerFast | ProcessorMixin,
-        messages: list[Message],
+        messages: list[Message | dict[str, Any]],
         multi_modal_data: dict[str, Any],
         tools: Optional[list[OpenAIFunctionToolSchema]] = None,
         add_generation_prompt: bool = False,
         tokenize: bool = False,
         return_dict: bool = False,
     ):
+        normalized_messages: list[dict[str, Any]] = []
+        for message in messages:
+            if isinstance(message, Message):
+                message_dict = message.model_dump()
+            else:
+                message_dict = dict(message)
+            if message_dict.get("content") is None:
+                message_dict["content"] = ""
+            if message_dict.get("tool_calls") is None:
+                message_dict["tool_calls"] = []
+            normalized_messages.append(message_dict)
+
         raw_prompt = processing_class.apply_chat_template(
-            messages, tools=tools, add_generation_prompt=add_generation_prompt, tokenize=False
+            normalized_messages, tools=tools, add_generation_prompt=add_generation_prompt, tokenize=False
         )
         if not tokenize:
             return raw_prompt
@@ -395,10 +407,12 @@ class AsyncRolloutRequest(BaseModel):
     def add_assistant_message(
         self,
         processing_class: PreTrainedTokenizer | PreTrainedTokenizerFast | ProcessorMixin,
-        content: str,
+        content: Optional[str],
         content_ids: Optional[torch.Tensor] = None,
         tool_calls: Optional[list[OpenAIFunctionToolCall]] = None,
     ) -> None:
+        if content is None:
+            content = ""  # Tool call parsers may emit None; chat templates require a string payload.
         self.messages.append(Message(role="assistant", content=content, tool_calls=tool_calls))
         if content_ids is None:
             messages = [*BASE_CHAT_HISTORY, self.messages[-1]]

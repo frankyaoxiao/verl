@@ -119,13 +119,28 @@ class SWEbenchSandboxTool(BaseTool):
 
     async def create(
         self,
-        instance_id: Optional[str] = None,
+        request_id: Optional[str] = None,
         **kwargs,
     ) -> tuple[str, ToolResponse]:
+        # SGLang passes request_id positionally while our dataset metadata also
+        # encodes an instance_id inside create_kwargs. Prefer the explicit value
+        # if provided and avoid duplicate binding errors.
+        embedded_instance_id = kwargs.pop("instance_id", None)
+        instance_id = request_id or embedded_instance_id
+        if request_id is not None and embedded_instance_id is not None and request_id != embedded_instance_id:
+            # Keep the first occurrence (SGLang request id) and drop the
+            # embedded copy so kwargs don't carry both.
+            logging.getLogger(__name__).debug(
+                "Ignoring embedded instance_id %s; using request id %s",
+                embedded_instance_id,
+                request_id,
+            )
         if instance_id is None:
             instance_id = str(uuid4())
 
-        create_kwargs = kwargs.get("create_kwargs", {})
+        create_kwargs = kwargs.get("create_kwargs")
+        if create_kwargs is None:
+            create_kwargs = kwargs
         dataset_instance = create_kwargs.get("dataset_instance")
         if dataset_instance is None:
             raise ValueError("dataset_instance is required in tools_kwargs for SWEbench execution")
