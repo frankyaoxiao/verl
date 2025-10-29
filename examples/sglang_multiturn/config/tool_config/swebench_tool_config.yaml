@@ -11,7 +11,7 @@ tools:
     repo_setup_timeout_seconds: 900
     eval_timeout_seconds: 900
     repo_path: /workspace/testbed
-    log_dir: ~/verl_swebench_logs
+    log_dir: tmp/verl_swebench_logs
     enable_e2b: true
     template: swebench-conda
   tool_schema:

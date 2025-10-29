@@ -189,7 +189,7 @@ class SWEbenchSandboxTool(BaseTool):
 
         if not self.enable_e2b:
             self._instances[instance_id] = record
-            return instance_id, ToolResponse(text="SWEbench sandbox initialised (offline mode).")
+            return instance_id, ToolResponse()
 
         sandbox_kwargs: dict[str, Any] = {"timeout": self.timeout_seconds}
         if self.template:
@@ -255,7 +255,7 @@ class SWEbenchSandboxTool(BaseTool):
             self._persist_logs(instance_id, "setup", record["logs"]["setup"])
             self._instances[instance_id] = record
 
-            return instance_id, ToolResponse(text="SWEbench sandbox ready.")
+            return instance_id, ToolResponse()
         except Exception as exc:
             if sandbox is not None:
                 try:
