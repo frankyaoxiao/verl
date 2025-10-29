@@ -30,7 +30,7 @@ SYSTEM_PROMPT = (
     "Use the tool with different actions to explore and validate your work:\n"
     "- `action=\"run_shell\"`: run shell commands (e.g., inspect files, run tests).\n"
     "- `action=\"read_file\"` / `action=\"write_file\"`: read or modify files inside the sandbox.\n"
-    "- `action=\"submit_patch\"`: apply your final diff and run the official SWEbench judge to receive a pass/fail reward.\n"
+    "- `action=\"submit_patch\"`: apply your final diff, run the official SWEbench judge, and end the sandbox session.\n"
     "Think carefully, plan your next action, and iteratively refine your solution using these capabilities until the tests pass."
 )
 USER_PROMPT_TEMPLATE = """Repository: {repo}
@@ -54,7 +54,7 @@ Instructions:
 - Use `run_swebench_tests` with the appropriate action to explore the sandbox.
   - Run shell commands with `action="run_shell"` to inspect or test your changes.
   - Read or write files with `action="read_file"` / `action="write_file"`.
-  - Call `action="submit_patch"` (supplying your unified diff via the `patch` field) only when you believe the fix is ready; this runs the official SWEbench judge.
+  - Call `action="submit_patch"` (supplying your unified diff via the `patch` field) only when you believe the fix is ready; this runs the judge and ends the session.
 - Provide unified diff patches when you believe the issue is resolved.
 """
 

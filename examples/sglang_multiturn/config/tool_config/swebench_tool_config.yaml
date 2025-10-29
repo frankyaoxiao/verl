@@ -1,33 +1,52 @@
 tools:
-  - class_name: "verl.tools.swebench_sandbox.SWEbenchSandboxTool"
-    config: 
-      type: native
-      docker_image: "swebench/base:latest"
-      workdir: "/workspace"
-      repo_cache: "~/swebench_repo_cache"
-      timeout_seconds: 900
-      install_timeout_seconds: 600
-      env_setup_timeout_seconds: 1200
-      repo_setup_timeout_seconds: 900
-      eval_timeout_seconds: 900
-      repo_path: "/workspace/testbed"
-      log_dir: "~/verl_swebench_logs"
-      enable_e2b: true
-      template: "swebench-conda"
-    tool_schema:
-      type: "function"
-      function:
-        name: "run_swebench_tests"
-        description: |
-          Apply a unified diff to the repository and execute the SWEbench evaluation harness.
-          Returns pass/fail status and execution logs.
-        parameters:
-          type: "object"
-          properties:
-            patch:
-              type: "string"
-              description: "Unified diff to apply."
-            notes:
-              type: "string"
-              description: "Optional rationale or metadata."
-          required: ["patch"]
+- class_name: verl.tools.swebench_sandbox.SWEbenchSandboxTool
+  config:
+    type: native
+    docker_image: swebench/base:latest
+    workdir: /workspace
+    repo_cache: ~/swebench_repo_cache
+    timeout_seconds: 900
+    install_timeout_seconds: 600
+    env_setup_timeout_seconds: 1200
+    repo_setup_timeout_seconds: 900
+    eval_timeout_seconds: 900
+    repo_path: /workspace/testbed
+    log_dir: ~/verl_swebench_logs
+    enable_e2b: true
+    template: swebench-conda
+  tool_schema:
+    type: function
+    function:
+      name: run_swebench_tests
+      description: "Interact with the SWEbench sandbox. This sandbox persists across\
+        \ tool calls, so you can:\n  - run shell commands (`action=\"run_shell\"`)\n\
+        \  - read or write files (`action=\"read_file\"` / `action=\"write_file\"\
+        `)\n  - submit your final patch for judging (`action=\"submit_patch\"`)\n\
+        Only call `action=\"submit_patch\"` when you are ready to be graded; it runs\
+        \ the SWEbench judge and ends the session."
+      parameters:
+        type: object
+        properties:
+          action:
+            type: string
+            description: run_shell | read_file | write_file | submit_patch
+          command:
+            type: string
+            description: Shell command to execute when action==run_shell.
+          cwd:
+            type: string
+            description: Working directory for run_shell commands.
+          path:
+            type: string
+            description: File path for read/write operations.
+          content:
+            type: string
+            description: File content when action==write_file.
+          patch:
+            type: string
+            description: Unified diff provided when action==submit_patch.
+          notes:
+            type: string
+            description: Optional rationale for submissions.
+        required:
+        - action
