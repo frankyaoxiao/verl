@@ -16,9 +16,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import multiprocessing as mp
 import os
+from pathlib import Path
 from copy import deepcopy
 from json import JSONDecodeError
 from typing import Any, Generator, Optional
@@ -1343,6 +1345,39 @@ class SGLangRollout(BaseRollout):
             "reward_scores": np.array(reward_scores),
             "request_id": np.array(request_ids),
         }
+
+        dump_dir = os.getenv("VERL_CONVERSATION_DUMP_DIR")
+        if dump_dir:
+            try:
+                dump_path = Path(dump_dir)
+                dump_path.mkdir(parents=True, exist_ok=True)
+                for req in sorted_output_req_list:
+                    file_name = f"{req.request_id}.txt"
+                    convo_path = dump_path / file_name
+                    with convo_path.open("w", encoding="utf-8") as fh:
+                        fh.write(f"request_id: {req.request_id}\n")
+                        fh.write(f"num_turns: {len(req.messages)}\n\n")
+                        for turn_index, message in enumerate(req.messages):
+                            msg_dict = (
+                                message.model_dump(mode="python", exclude_none=False)
+                                if hasattr(message, "model_dump")
+                                else dict(message)
+                            )
+                            role = msg_dict.get("role")
+                            fh.write(f"--- turn {turn_index} | role={role} ---\n")
+                            tool_calls = msg_dict.get("tool_calls")
+                            if tool_calls:
+                                fh.write("tool_calls:\n")
+                                fh.write(json.dumps(tool_calls, ensure_ascii=False, indent=2))
+                                fh.write("\n")
+                            content = msg_dict.get("content")
+                            if isinstance(content, str):
+                                fh.write(content)
+                            else:
+                                fh.write(json.dumps(content, ensure_ascii=False, indent=2))
+                            fh.write("\n\n")
+            except Exception:  # pragma: no cover - best effort debug dump
+                logger.exception("Failed to dump conversation transcripts to %s", dump_dir)
 
         is_multimodal = isinstance(self.processing_class, ProcessorMixin) and (
             hasattr(self.processing_class, "image_processor") or hasattr(self.model_hf_config, "vision_config")

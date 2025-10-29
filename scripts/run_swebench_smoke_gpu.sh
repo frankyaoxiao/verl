@@ -22,6 +22,12 @@ export SWEBENCH_TOOL_CONFIG=${SWEBENCH_TOOL_CONFIG:-examples/sglang_multiturn/co
 # Number of GPUs to allocate to the trainer (defaults to 1).
 export SWEBENCH_NUM_GPUS=${SWEBENCH_NUM_GPUS:-1}
 
+# Default to Llama 3.1 8B unless the caller overrides.
+export SWEBENCH_MODEL=${SWEBENCH_MODEL:-meta-llama/Llama-3.1-8B-Instruct}
+
+# Force Ray to start a local instance unless the caller already supplied an address.
+export RAY_ADDRESS=${RAY_ADDRESS:-local}
+
 # Always run the trainer step in the smoke test.
 export RUN_TRAIN=1
 

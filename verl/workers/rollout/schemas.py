@@ -234,13 +234,46 @@ class AsyncRolloutRequest(BaseModel):
         normalized_messages: list[dict[str, Any]] = []
         for message in messages:
             if isinstance(message, Message):
-                message_dict = message.model_dump()
+                message_dict = message.model_dump(mode="python", exclude_none=True)
             else:
                 message_dict = dict(message)
+            message_dict = dict(message_dict)  # shallow copy
             if message_dict.get("content") is None:
                 message_dict["content"] = ""
-            if message_dict.get("tool_calls") is None:
-                message_dict["tool_calls"] = []
+            if "tool_calls" in message_dict:
+                tool_calls = message_dict["tool_calls"]
+                if not tool_calls:
+                    message_dict.pop("tool_calls", None)
+                else:
+                    if isinstance(tool_calls, tuple):
+                        tool_calls = list(tool_calls)
+                    elif not isinstance(tool_calls, list):
+                        logger.warning(
+                            "Normalizing tool_calls with unexpected type %s; coercing to list.",
+                            type(tool_calls),
+                        )
+                        tool_calls = [tool_calls]
+                    normalized_tool_calls = []
+                    for tool_call in tool_calls:
+                        if isinstance(tool_call, OpenAIFunctionToolCall):
+                            normalized_tool_calls.append(tool_call.model_dump(mode="python", exclude_none=True))
+                        elif isinstance(tool_call, dict):
+                            normalized_tool_calls.append(tool_call)
+                        else:
+                            logger.warning(
+                                "Dropping tool_call entry with unsupported type %s",
+                                type(tool_call),
+                            )
+                    if not normalized_tool_calls:
+                        message_dict.pop("tool_calls", None)
+                    else:
+                        if len(normalized_tool_calls) > 1:
+                            logger.warning(
+                                "Multiple tool calls detected (%d entries); keeping the first to satisfy template.",
+                                len(normalized_tool_calls),
+                            )
+                            normalized_tool_calls = normalized_tool_calls[:1]
+                        message_dict["tool_calls"] = normalized_tool_calls
             normalized_messages.append(message_dict)
 
         raw_prompt = processing_class.apply_chat_template(

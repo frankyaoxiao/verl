@@ -78,28 +78,60 @@ class NaiveRewardManager(AbstractRewardManager):
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
             response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
 
-            ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
-            data_source = data_item.non_tensor_batch[self.reward_fn_key]
+            reward_meta = data_item.non_tensor_batch.get("reward_model", {})
+            data_source = data_item.non_tensor_batch.get(self.reward_fn_key)
             extra_info = data_item.non_tensor_batch.get("extra_info", {})
             num_turns = data_item.non_tensor_batch.get("__num_turns__", None)
             rollout_reward_scores = data_item.non_tensor_batch.get("reward_scores", {})
             extra_info["num_turns"] = num_turns
             extra_info["rollout_reward_scores"] = rollout_reward_scores
 
-            score = self.compute_score(
-                data_source=data_source,
-                solution_str=response_str,
-                ground_truth=ground_truth,
-                extra_info=extra_info,
-            )
+            reward_style = reward_meta.get("style")
+            reward_name = reward_meta.get("name")
+            ground_truth = reward_meta.get("ground_truth")
+
+            score = None
+
+            if reward_style == "tool":
+                # Prefer tool-specific reward if we have one.
+                if isinstance(rollout_reward_scores, dict) and rollout_reward_scores:
+                    if reward_name in rollout_reward_scores:
+                        score = rollout_reward_scores[reward_name]
+                    else:
+                        # Take the first numeric entry as a fallback.
+                        for value in rollout_reward_scores.values():
+                            if isinstance(value, (int, float, bool)):
+                                score = float(value)
+                                break
+                if score is None:
+                    # Could not determine a tool reward; fall back to compute_score if possible.
+                    if ground_truth is not None and data_source is not None:
+                        score = self.compute_score(
+                            data_source=data_source,
+                            solution_str=response_str,
+                            ground_truth=ground_truth,
+                            extra_info=extra_info,
+                        )
+                    else:
+                        score = 0.0
+            else:
+                if ground_truth is None:
+                    score = 0.0
+                else:
+                    score = self.compute_score(
+                        data_source=data_source,
+                        solution_str=response_str,
+                        ground_truth=ground_truth,
+                        extra_info=extra_info,
+                    )
 
             if isinstance(score, dict):
-                reward = score["score"]
+                reward = score.get("score", 0.0)
                 # Store the information including original reward
                 for key, value in score.items():
                     reward_extra_info[key].append(value)
             else:
-                reward = score
+                reward = float(score)
 
             reward_tensor[i, valid_response_length - 1] = reward
 

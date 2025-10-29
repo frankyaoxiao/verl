@@ -21,6 +21,7 @@ This trainer supports model-agonistic model initialization with huggingface
 import json
 import os
 import uuid
+from pathlib import Path
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -452,7 +453,12 @@ class RayPPOTrainer:
         print(f"Dumped generations to {filename}")
 
     def _log_rollout_data(
-        self, batch: DataProto, reward_extra_infos_dict: dict, timing_raw: dict, rollout_data_dir: str
+        self,
+        batch: DataProto,
+        reward_extra_infos_dict: dict,
+        timing_raw: dict,
+        rollout_data_dir: str,
+        global_step: int,
     ):
         """Log rollout data to disk.
         Args:
@@ -482,6 +488,32 @@ class RayPPOTrainer:
                 reward_extra_infos_dict=reward_extra_infos_to_dump,
                 dump_path=rollout_data_dir,
             )
+
+            # Optionally dump full conversation (including tool turns) for inspection.
+            messages_array = batch.non_tensor_batch.get("messages")
+            if messages_array is not None:
+                convo_dir = Path(rollout_data_dir) / "conversations"
+                convo_dir.mkdir(parents=True, exist_ok=True)
+                for idx, message_list in enumerate(messages_array.tolist()):
+                    convo_path = convo_dir / f"step{global_step:06d}_sample{idx:02d}.txt"
+                    try:
+                        with convo_path.open("w", encoding="utf-8") as fh:
+                            for turn_index, message in enumerate(message_list):
+                                role = message.get("role")
+                                fh.write(f"Turn {turn_index} | role={role}\n")
+                                content = message.get("content")
+                                tool_calls = message.get("tool_calls")
+                                if tool_calls:
+                                    fh.write("tool_calls:\n")
+                                    fh.write(json.dumps(tool_calls, ensure_ascii=False, indent=2))
+                                    fh.write("\n")
+                                if isinstance(content, str):
+                                    fh.write(content)
+                                else:
+                                    fh.write(json.dumps(content, ensure_ascii=False, indent=2))
+                                fh.write("\n\n")
+                    except Exception as exc:  # pragma: no cover - debug aid only
+                        print(f"Failed to dump conversation to {convo_path}: {exc}")
 
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
@@ -1235,7 +1267,13 @@ class RayPPOTrainer:
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
-                        self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
+                        self._log_rollout_data(
+                            batch,
+                            reward_extra_infos_dict,
+                            timing_raw,
+                            rollout_data_dir,
+                            global_step=self.global_steps,
+                        )
 
                 # validate
                 if (
