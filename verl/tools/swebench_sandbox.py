@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -196,7 +197,9 @@ class SWEbenchSandboxTool(BaseTool):
         stage_logs: list[str] = []
 
         try:
-            sandbox = E2BSandbox.create(**sandbox_kwargs)
+            # Run blocking E2B sandbox creation in thread pool to avoid blocking event loop
+            # This allows multiple sandboxes to be created in parallel
+            sandbox = await asyncio.to_thread(E2BSandbox.create, **sandbox_kwargs)
             record["sandbox"] = sandbox
 
             # Prepare workspace directory and permissions.
@@ -256,7 +259,7 @@ class SWEbenchSandboxTool(BaseTool):
         except Exception as exc:
             if sandbox is not None:
                 try:
-                    sandbox.close()
+                    sandbox.kill()
                 except Exception:  # pragma: no cover - best effort cleanup
                     pass
             raise exc
@@ -305,7 +308,7 @@ class SWEbenchSandboxTool(BaseTool):
         sandbox: Optional[E2BSandbox] = record.get("sandbox")
         if sandbox is not None:
             try:
-                sandbox.close()
+                sandbox.kill()
             except Exception:  # pragma: no cover - best effort cleanup
                 LOGGER.exception("Failed to close sandbox for %s", instance_id)
 
