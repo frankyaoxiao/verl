@@ -35,6 +35,8 @@ SYSTEM_PROMPT = (
     "Important: Shell state (like current directory) doesn't persist between commands. "
     "Use `cd directory && your_command` to run commands in specific directories. "
     "However, file changes are persistent across all commands.\n\n"
+    "You have a maximum of 6 turns to solve the issue. Plan your approach efficiently and make sure to call "
+    "`action=\"submit_patch\"` before running out of turns.\n\n"
     "Think carefully, plan your next action, and iteratively refine your solution using these capabilities until the tests pass."
 )
 USER_PROMPT_TEMPLATE = """Repository: {repo}

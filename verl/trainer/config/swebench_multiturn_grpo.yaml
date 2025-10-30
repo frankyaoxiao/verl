@@ -40,7 +40,8 @@ actor_rollout_ref:
     name: sglang
     n: 1
     tensor_model_parallel_size: 1
-    gpu_memory_utilization: 0.4
+    gpu_memory_utilization: 0.7  # Increased from 0.4 for better KV cache and throughput
+    max_num_batched_tokens: 32768  # Increased from default 8192 for better batching
     multi_turn:
       enable: True
       max_assistant_turns: 6

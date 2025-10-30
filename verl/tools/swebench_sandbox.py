@@ -201,8 +201,11 @@ class SWEbenchSandboxTool(BaseTool):
             nonlocal sandbox, stage_logs
             
             # Create sandbox (synchronous)
+            t_start = time.time()
+            LOGGER.info(f"[TIMING] {instance_id[:8]} - Starting E2B sandbox creation")
             sandbox = E2BSandbox.create(**sandbox_kwargs)
             record["sandbox"] = sandbox
+            LOGGER.info(f"[TIMING] {instance_id[:8]} - E2B sandbox created in {time.time() - t_start:.2f}s")
 
             # Prepare workspace directory and permissions.
             self._run_command(
@@ -230,6 +233,8 @@ class SWEbenchSandboxTool(BaseTool):
             )
             stage_logs.append(self._format_stage("Conda terms acceptance", tos_result))
 
+            t_env_start = time.time()
+            LOGGER.info(f"[TIMING] {instance_id[:8]} - Starting environment setup")
             env_result = self._run_script(
                 sandbox,
                 script_content=test_spec.setup_env_script,
@@ -238,6 +243,7 @@ class SWEbenchSandboxTool(BaseTool):
                 stage_name="Environment setup",
             )
             stage_logs.append(self._format_stage("Environment setup", env_result))
+            LOGGER.info(f"[TIMING] {instance_id[:8]} - Environment setup completed in {time.time() - t_env_start:.2f}s")
 
             # Safety: Remove repo_path if it exists before running install_repo_script.
             # The script expects to git clone into an empty/non-existent directory.
@@ -250,6 +256,8 @@ class SWEbenchSandboxTool(BaseTool):
                 allow_error=True,
             )
 
+            t_repo_start = time.time()
+            LOGGER.info(f"[TIMING] {instance_id[:8]} - Starting repository setup")
             repo_result = self._run_script(
                 sandbox,
                 script_content=test_spec.install_repo_script,
@@ -258,6 +266,7 @@ class SWEbenchSandboxTool(BaseTool):
                 stage_name="Repository setup",
             )
             stage_logs.append(self._format_stage("Repository setup", repo_result))
+            LOGGER.info(f"[TIMING] {instance_id[:8]} - Repository setup completed in {time.time() - t_repo_start:.2f}s")
 
             record["logs"]["setup"] = "\n\n".join(stage_logs)
             self._persist_logs(instance_id, "setup", record["logs"]["setup"])
@@ -266,7 +275,11 @@ class SWEbenchSandboxTool(BaseTool):
         try:
             # Run the entire blocking setup sequence in a thread pool to avoid blocking event loop
             # This allows multiple sandboxes to be created AND set up in parallel
+            t_total_start = time.time()
+            LOGGER.info(f"[TIMING] {instance_id[:8]} - Starting complete sandbox setup (create + env + repo)")
             await asyncio.to_thread(_do_setup)
+            total_elapsed = time.time() - t_total_start
+            LOGGER.info(f"[TIMING] {instance_id[:8]} - Total sandbox setup completed in {total_elapsed:.2f}s")
 
             return instance_id, ToolResponse()
         except Exception as exc:
@@ -294,20 +307,29 @@ class SWEbenchSandboxTool(BaseTool):
 
         action = action.lower()
 
+        # Run blocking E2B API calls in thread pool to avoid blocking event loop
+        # This allows multiple tool calls to execute in parallel via asyncio.gather()
+        start_time = time.time()
+        LOGGER.info(f"[TIMING] {instance_id[:8]} - Starting tool execution: {action}")
+        
         if action == "run_shell":
-            return self._execute_run_shell(instance_id, record, parameters)
-        if action == "read_file":
-            return self._execute_read_file(instance_id, record, parameters)
-        if action == "write_file":
-            return self._execute_write_file(instance_id, record, parameters)
-        if action == "submit_patch":
+            result = await asyncio.to_thread(self._execute_run_shell, instance_id, record, parameters)
+        elif action == "read_file":
+            result = await asyncio.to_thread(self._execute_read_file, instance_id, record, parameters)
+        elif action == "write_file":
+            result = await asyncio.to_thread(self._execute_write_file, instance_id, record, parameters)
+        elif action == "submit_patch":
             patch = parameters.get("patch")
             notes = parameters.get("notes", "")
             if not isinstance(patch, str) or not patch.strip():
                 return ToolResponse(text="No patch provided."), 0.0, {"status": "invalid_patch"}
-            return self._execute_submit_patch(instance_id, record, patch, notes)
-
-        return ToolResponse(text=f"Unknown action '{action}'. Nothing executed."), 0.0, {"status": "unknown_action"}
+            result = await asyncio.to_thread(self._execute_submit_patch, instance_id, record, patch, notes)
+        else:
+            return ToolResponse(text=f"Unknown action '{action}'. Nothing executed."), 0.0, {"status": "unknown_action"}
+        
+        elapsed = time.time() - start_time
+        LOGGER.info(f"[TIMING] {instance_id[:8]} - Completed {action} in {elapsed:.2f}s")
+        return result
 
     async def calc_reward(self, instance_id: str, **kwargs) -> float:  # noqa: D401
         if instance_id not in self._instances:

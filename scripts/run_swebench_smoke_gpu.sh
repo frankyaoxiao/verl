@@ -34,6 +34,9 @@ export RUN_TRAIN=1
 # Enable full conversation logging for debugging (saved to tmp/conversations/)
 export VERL_CONVERSATION_DUMP_DIR=${VERL_CONVERSATION_DUMP_DIR:-tmp/conversations}
 
+# Enable detailed timing logs for debugging performance
+export VERL_LOGGING_LEVEL=${VERL_LOGGING_LEVEL:-INFO}
+
 # Hydra chokes on tildes; precompute absolute dataset paths.
 export SWEBENCH_TRAIN="${DATA_ROOT}/rl/train.parquet"
 export SWEBENCH_VAL="${DATA_ROOT}/rl/val.parquet"

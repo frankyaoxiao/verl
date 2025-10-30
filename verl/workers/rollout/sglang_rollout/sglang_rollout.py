@@ -812,6 +812,11 @@ class SGLangRollout(BaseRollout):
         **kwargs,
     ) -> AsyncRolloutRequest:
         assert self._tp_rank == 0, "only the master process can call this function"
+        
+        import time
+        t_rollout_start = time.time()
+        logger.info(f"[TIMING] {req.request_id[:8]} - Starting rollout")
+        
         _req = deepcopy(req)
         finish_reason_type = None
         output = None
@@ -861,6 +866,13 @@ class SGLangRollout(BaseRollout):
                     parsed_tool_calls = _req.messages[-1].tool_calls
                     # NOTE: Don't clear tool_calls - we need them for conversation dumps and debugging
                     # The skip_tokenizer_init optimization doesn't require clearing them
+                    
+                    import time
+                    t_tool_start = time.time()
+                    num_tools = len(parsed_tool_calls)
+                    tool_names = [tc.function.name for tc in parsed_tool_calls]
+                    logger.info(f"[TIMING] {_req.request_id[:8]} - Starting {num_tools} tool call(s): {tool_names}")
+                    
                     tool_call_results = await asyncio.gather(
                         *[
                             self._tool_map[tool_call.function.name].execute(
@@ -871,6 +883,10 @@ class SGLangRollout(BaseRollout):
                             for tool_call in parsed_tool_calls
                         ]
                     )
+                    
+                    t_tool_elapsed = time.time() - t_tool_start
+                    logger.info(f"[TIMING] {_req.request_id[:8]} - Completed {num_tools} tool call(s) in {t_tool_elapsed:.2f}s")
+                    
                     _req.add_tool_response_messages(self.processing_class, [resp for resp, _, _ in tool_call_results])
                     for tool_call, (resp, reward, metrics) in zip(parsed_tool_calls, tool_call_results, strict=True):
                         _req.update_metrics(metrics, tool_call.function.name)
@@ -906,7 +922,16 @@ class SGLangRollout(BaseRollout):
                         "video support is not implemented yet, current length of video data is %d", len(video_data)
                     )
 
+                import time
+                t_gen_start = time.time()
+                logger.info(f"[TIMING] {_req.request_id[:8]} - Turn {current_turns}: Starting generation (prompt_len={prompt_length})")
+                
                 output = await self._handle_engine_call(_req, request_sampling_params, image_data=image_data)
+                
+                t_gen_elapsed = time.time() - t_gen_start
+                output_len = len(output.get("output_ids", [])) if self.config.skip_tokenizer_init else len(output.get("text", "")) // 4
+                logger.info(f"[TIMING] {_req.request_id[:8]} - Turn {current_turns}: Generation completed in {t_gen_elapsed:.2f}s (~{output_len} tokens)")
+                
                 if self.config.skip_tokenizer_init:
                     content_ids = output["output_ids"]
                     content = self.processing_class.decode(content_ids, skip_special_tokens=True)
@@ -1048,6 +1073,9 @@ class SGLangRollout(BaseRollout):
             )
             # len(input_token_logprobs) = len(input_tokens)-1，because logprob of 1st token is None
             _req.output_token_ids, _req.rollout_log_probs = _extract_logprob_from_output(output)
+        
+        t_rollout_total = time.time() - t_rollout_start
+        logger.info(f"[TIMING] {_req.request_id[:8]} - Rollout completed in {t_rollout_total:.2f}s (turns={current_turns})")
         return _req
 
     async def _handle_engine_call(
