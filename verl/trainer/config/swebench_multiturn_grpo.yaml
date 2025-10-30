@@ -34,6 +34,7 @@ actor_rollout_ref:
       lr: 5e-7
     ppo_mini_batch_size: ${oc.env:SWEBENCH_PPO_MINI_BATCH,8}
     ppo_micro_batch_size_per_gpu: 1
+    ppo_max_token_len_per_gpu: 32768  
     use_dynamic_bsz: True
   rollout:
     name: sglang

@@ -196,10 +196,12 @@ class SWEbenchSandboxTool(BaseTool):
         sandbox: Optional[E2BSandbox] = None
         stage_logs: list[str] = []
 
-        try:
-            # Run blocking E2B sandbox creation in thread pool to avoid blocking event loop
-            # This allows multiple sandboxes to be created in parallel
-            sandbox = await asyncio.to_thread(E2BSandbox.create, **sandbox_kwargs)
+        # Define the entire synchronous setup sequence that should run in a thread
+        def _do_setup():
+            nonlocal sandbox, stage_logs
+            
+            # Create sandbox (synchronous)
+            sandbox = E2BSandbox.create(**sandbox_kwargs)
             record["sandbox"] = sandbox
 
             # Prepare workspace directory and permissions.
@@ -209,13 +211,8 @@ class SWEbenchSandboxTool(BaseTool):
                 timeout=60,
                 desc="prepare workspace",
             )
-            if self.repo_path.startswith("/workspace"):
-                self._run_command(
-                    sandbox,
-                    f"mkdir -p {self.repo_path} && chmod -R 777 {self.repo_path}",
-                    timeout=60,
-                    desc="prepare repo directory",
-                )
+            # NOTE: Do NOT create repo_path directory here! The install_repo_script
+            # will create it via git clone. Pre-creating it causes "directory exists" errors.
 
             # Accept conda terms (best-effort).
             tos_cmd = (
@@ -242,6 +239,17 @@ class SWEbenchSandboxTool(BaseTool):
             )
             stage_logs.append(self._format_stage("Environment setup", env_result))
 
+            # Safety: Remove repo_path if it exists before running install_repo_script.
+            # The script expects to git clone into an empty/non-existent directory.
+            # This handles edge cases where the directory might be created by env setup or other scripts.
+            self._run_command(
+                sandbox,
+                f"rm -rf {self.repo_path}",
+                timeout=60,
+                desc="clean testbed directory",
+                allow_error=True,
+            )
+
             repo_result = self._run_script(
                 sandbox,
                 script_content=test_spec.install_repo_script,
@@ -254,6 +262,11 @@ class SWEbenchSandboxTool(BaseTool):
             record["logs"]["setup"] = "\n\n".join(stage_logs)
             self._persist_logs(instance_id, "setup", record["logs"]["setup"])
             self._instances[instance_id] = record
+
+        try:
+            # Run the entire blocking setup sequence in a thread pool to avoid blocking event loop
+            # This allows multiple sandboxes to be created AND set up in parallel
+            await asyncio.to_thread(_do_setup)
 
             return instance_id, ToolResponse()
         except Exception as exc:
@@ -437,13 +450,8 @@ class SWEbenchSandboxTool(BaseTool):
                 timeout=60,
                 desc="prepare workspace",
             )
-            if self.repo_path.startswith("/workspace"):
-                self._run_command(
-                    sandbox,
-                    f"mkdir -p {self.repo_path} && chmod -R 777 {self.repo_path}",
-                    timeout=60,
-                    desc="prepare repo directory",
-                )
+            # NOTE: Do NOT create repo_path directory here! The install_repo_script
+            # will create it via git clone. Pre-creating it causes "directory exists" errors.
 
             tos_cmd = (
                 "bash -lc '"
@@ -468,6 +476,17 @@ class SWEbenchSandboxTool(BaseTool):
                 stage_name="Environment setup",
             )
             stage_logs.append(self._format_stage("Environment setup", env_result))
+
+            # Safety: Remove repo_path if it exists before running install_repo_script.
+            # The script expects to git clone into an empty/non-existent directory.
+            # This handles edge cases where the directory might be created by env setup or other scripts.
+            self._run_command(
+                sandbox,
+                f"rm -rf {self.repo_path}",
+                timeout=60,
+                desc="clean testbed directory",
+                allow_error=True,
+            )
 
             repo_result = self._run_script(
                 sandbox,

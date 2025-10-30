@@ -859,8 +859,8 @@ class SGLangRollout(BaseRollout):
             elif _req.state == AsyncRolloutRequestStateEnum.TOOL_CALLING:
                 if _req.messages[-1].tool_calls is not None:
                     parsed_tool_calls = _req.messages[-1].tool_calls
-                    if self.config.skip_tokenizer_init:
-                        _req.messages[-1].tool_calls = None
+                    # NOTE: Don't clear tool_calls - we need them for conversation dumps and debugging
+                    # The skip_tokenizer_init optimization doesn't require clearing them
                     tool_call_results = await asyncio.gather(
                         *[
                             self._tool_map[tool_call.function.name].execute(
