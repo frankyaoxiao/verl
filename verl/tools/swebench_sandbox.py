@@ -71,6 +71,7 @@ class SWEbenchSandboxTool(BaseTool):
                     Interact with a persistent SWEbench sandbox hosted on E2B.
                     Available actions:
                       - run_shell: run a shell command inside the sandbox and capture stdout/stderr.
+                        Note: each command starts fresh in /workspace/testbed. Use 'cd dir && command' to work in subdirectories.
                       - read_file: read a file from the sandbox.
                       - write_file: write content to a file inside the sandbox.
                       - submit_patch: apply a unified diff and run the SWEbench evaluation harness.
@@ -86,11 +87,7 @@ class SWEbenchSandboxTool(BaseTool):
                         },
                         "command": {
                             "type": "string",
-                            "description": "Shell command to execute when action == run_shell.",
-                        },
-                        "cwd": {
-                            "type": "string",
-                            "description": "Working directory for shell commands (defaults to repo root).",
+                            "description": "Shell command to execute when action == run_shell. Each command starts fresh in /workspace/testbed. Use 'cd directory && your_command' to run commands in other directories.",
                         },
                         "path": {
                             "type": "string",
@@ -546,7 +543,8 @@ class SWEbenchSandboxTool(BaseTool):
         if not command:
             return ToolResponse(text="Missing 'command' parameter for run_shell."), 0.0, {"status": "invalid_command"}
 
-        cwd = parameters.get("cwd") or self.repo_path
+        # Always use repo_path as working directory
+        cwd = self.repo_path
         formatted_command = f"bash -lc {json.dumps(command)}"
         result = self._run_command(
             sandbox,

@@ -28,9 +28,13 @@ SYSTEM_PROMPT = (
     "You are an autonomous software engineer tasked with resolving issues in real-world repositories. "
     "Your workspace is a persistent SWEbench sandbox that you can access via the `run_swebench_tests` tool. "
     "Use the tool with different actions to explore and validate your work:\n"
-    "- `action=\"run_shell\"`: run shell commands (e.g., inspect files, run tests).\n"
+    "- `action=\"run_shell\"`: run shell commands (e.g., inspect files, run tests). "
+    "Each command starts fresh in the repository root (/workspace/testbed), so use `cd dir && command` if you need to work in subdirectories.\n"
     "- `action=\"read_file\"` / `action=\"write_file\"`: read or modify files inside the sandbox.\n"
-    "- `action=\"submit_patch\"`: apply your final diff, run the official SWEbench judge, and end the sandbox session.\n"
+    "- `action=\"submit_patch\"`: apply your final diff, run the official SWEbench judge, and end the sandbox session.\n\n"
+    "Important: Shell state (like current directory) doesn't persist between commands. "
+    "Use `cd directory && your_command` to run commands in specific directories. "
+    "However, file changes are persistent across all commands.\n\n"
     "Think carefully, plan your next action, and iteratively refine your solution using these capabilities until the tests pass."
 )
 USER_PROMPT_TEMPLATE = """Repository: {repo}
