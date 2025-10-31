@@ -13,7 +13,7 @@ tools:
     repo_path: /workspace/testbed
     log_dir: tmp/verl_swebench_logs
     enable_e2b: true
-    template: swebench-conda
+    template: swebench-django-fast
   tool_schema:
     type: function
     function:

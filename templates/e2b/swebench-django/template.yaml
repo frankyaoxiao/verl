@@ -1,0 +1,6 @@
+name: swebench-django-fast
+version: 0.1.0
+dockerfile: Dockerfile
+start:
+  command: bash -lc "echo 'swebench-django-fast ready'"
+
