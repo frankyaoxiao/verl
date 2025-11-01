@@ -31,6 +31,14 @@ export RAY_ADDRESS=${RAY_ADDRESS:-local}
 # Always run the trainer step in the smoke test.
 export RUN_TRAIN=1
 
+# Enable prewarmed SWEbench envs (skip conda create inside sandbox if template already contains it)
+export SWEBENCH_PREWARMED=${SWEBENCH_PREWARMED:-1}
+
+# Optional: point to a specific prebuilt E2B template alias for the SWEbench sandbox tool.
+# If unset, the tool config falls back to the default alias.
+# Example: export SWEBENCH_TEMPLATE_ALIAS="swebench-mini-OWNER_REPO-<hash>"
+export SWEBENCH_TEMPLATE_ALIAS=${SWEBENCH_TEMPLATE_ALIAS:-}
+
 # Enable full conversation logging for debugging (saved to tmp/conversations/)
 export VERL_CONVERSATION_DUMP_DIR=${VERL_CONVERSATION_DUMP_DIR:-tmp/conversations}
 

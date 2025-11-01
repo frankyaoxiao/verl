@@ -13,7 +13,9 @@ tools:
     repo_path: /workspace/testbed
     log_dir: tmp/verl_swebench_logs
     enable_e2b: true
-    template: swebench-conda
+    template: ${oc.env:SWEBENCH_TEMPLATE_ALIAS,swebench-conda}
+    prewarm: ${oc.env:SWEBENCH_PREWARMED,0}
+    prewarm_env_name: ${oc.env:SWEBENCH_PREWARM_ENV_NAME,testbed}
     worktree_mode: true
     worktree_root: /workspace/worktrees
   tool_schema:

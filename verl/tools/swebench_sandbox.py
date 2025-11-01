@@ -126,6 +126,16 @@ class SWEbenchSandboxTool(BaseTool):
         self.template = config.get("template")
         self.workspace = config.get("workdir", "/workspace")
         self.repo_path = config.get("repo_path", "/testbed")
+        # Optional: pre-warmed environment skip. If enabled and an environment
+        # named `prewarm_env_name` already exists, skip running the harness
+        # env setup script to save time (templates may bake the env already).
+        env_flag = os.getenv("SWEBENCH_PREWARMED", "1")
+        try:
+            env_flag_bool = bool(int(env_flag))
+        except Exception:
+            env_flag_bool = False
+        self.prewarm: bool = bool(config.get("prewarm", env_flag_bool))
+        self.prewarm_env_name: str = config.get("prewarm_env_name", "testbed")
         self.env_setup_timeout_seconds = config.get(
             "env_setup_timeout_seconds", self.install_timeout_seconds
         )
@@ -146,6 +156,28 @@ class SWEbenchSandboxTool(BaseTool):
         self._canonicals: dict[str, dict[str, Any]] = {}
         self._req_to_canon: dict[str, str] = {}
         self._req_worktrees: dict[str, str] = {}
+
+    def _env_exists(self, sandbox: E2BSandbox) -> bool:
+        """Check whether the pre-warmed conda env exists in the sandbox.
+
+        Requires conda to be installed at /opt/miniconda3 (as in our templates).
+        Best-effort: return False on any error.
+        """
+        try:
+            cmd = (
+                "bash -lc '"
+                "source /opt/miniconda3/etc/profile.d/conda.sh && "
+                "conda env list'"
+            )
+            res = self._run_command(
+                sandbox, cmd, timeout=60, desc="Check conda envs", allow_error=True
+            )
+            if res.exit_code != 0:
+                return False
+            out = (res.stdout or "")
+            return self.prewarm_env_name in out
+        except Exception:
+            return False
 
     def get_openai_tool_schema(self) -> OpenAIFunctionToolSchema:  # noqa: D401
         return self.tool_schema
@@ -200,8 +232,20 @@ class SWEbenchSandboxTool(BaseTool):
             return instance_id, ToolResponse()
 
         sandbox_kwargs: dict[str, Any] = {"timeout": self.timeout_seconds}
-        if self.template:
-            sandbox_kwargs["template"] = self.template
+        # Template selection priority:
+        # 1) Per-request override from create_kwargs (e.g., dataset-provided)
+        # 2) Tool-level default from config
+        req_template = None
+        try:
+            req_template = (kwargs.get("template") or {}).get("alias")  # tolerate structured input
+        except Exception:
+            req_template = kwargs.get("template")
+        create_kwargs_template = None
+        if isinstance(kwargs.get("create_kwargs"), dict):
+            create_kwargs_template = kwargs["create_kwargs"].get("template")
+        chosen_template = create_kwargs_template or req_template or self.template
+        if chosen_template:
+            sandbox_kwargs["template"] = chosen_template
 
         sandbox: Optional[E2BSandbox] = None
         stage_logs: list[str] = []
@@ -246,13 +290,23 @@ class SWEbenchSandboxTool(BaseTool):
                     # Env setup
                     t_env_start = time.time()
                     LOGGER.info(f"[TIMING] {canonical_id[:8]} - Starting environment setup")
-                    env_result = self._run_script(
-                        sbox,
-                        script_content=test_spec.setup_env_script,
-                        remote_name="setup_env.sh",
-                        timeout=self.env_setup_timeout_seconds,
-                        stage_name="Environment setup",
-                    )
+                    if self.prewarm and self._env_exists(sbox):
+                        # Skip running env script if template is pre-warmed.
+                        env_result = CommandResult(
+                            command="(skipped)",
+                            exit_code=0,
+                            stdout=f"Prewarmed env '{self.prewarm_env_name}' detected; skipping env setup.",
+                            stderr="",
+                            time=0.0,
+                        )
+                    else:
+                        env_result = self._run_script(
+                            sbox,
+                            script_content=test_spec.setup_env_script,
+                            remote_name="setup_env.sh",
+                            timeout=self.env_setup_timeout_seconds,
+                            stage_name="Environment setup",
+                        )
                     stage_logs.append(self._format_stage("Environment setup", env_result))
                     LOGGER.info(
                         f"[TIMING] {canonical_id[:8]} - Environment setup completed in {time.time() - t_env_start:.2f}s"
@@ -343,13 +397,22 @@ class SWEbenchSandboxTool(BaseTool):
 
             t_env_start = time.time()
             LOGGER.info(f"[TIMING] {instance_id[:8]} - Starting environment setup")
-            env_result = self._run_script(
-                sandbox,
-                script_content=test_spec.setup_env_script,
-                remote_name="setup_env.sh",
-                timeout=self.env_setup_timeout_seconds,
-                stage_name="Environment setup",
-            )
+            if self.prewarm and self._env_exists(sandbox):
+                env_result = CommandResult(
+                    command="(skipped)",
+                    exit_code=0,
+                    stdout=f"Prewarmed env '{self.prewarm_env_name}' detected; skipping env setup.",
+                    stderr="",
+                    time=0.0,
+                )
+            else:
+                env_result = self._run_script(
+                    sandbox,
+                    script_content=test_spec.setup_env_script,
+                    remote_name="setup_env.sh",
+                    timeout=self.env_setup_timeout_seconds,
+                    stage_name="Environment setup",
+                )
             stage_logs.append(self._format_stage("Environment setup", env_result))
             LOGGER.info(f"[TIMING] {instance_id[:8]} - Environment setup completed in {time.time() - t_env_start:.2f}s")
 
@@ -636,13 +699,22 @@ class SWEbenchSandboxTool(BaseTool):
             )
             stage_logs.append(self._format_stage("Conda terms acceptance", tos_result))
 
-            env_result = self._run_script(
-                sandbox,
-                script_content=test_spec.setup_env_script,
-                remote_name="setup_env.sh",
-                timeout=self.env_setup_timeout_seconds,
-                stage_name="Environment setup",
-            )
+            if self.prewarm and self._env_exists(sandbox):
+                env_result = CommandResult(
+                    command="(skipped)",
+                    exit_code=0,
+                    stdout=f"Prewarmed env '{self.prewarm_env_name}' detected; skipping env setup.",
+                    stderr="",
+                    time=0.0,
+                )
+            else:
+                env_result = self._run_script(
+                    sandbox,
+                    script_content=test_spec.setup_env_script,
+                    remote_name="setup_env.sh",
+                    timeout=self.env_setup_timeout_seconds,
+                    stage_name="Environment setup",
+                )
             stage_logs.append(self._format_stage("Environment setup", env_result))
 
             # Safety: Remove repo_path if it exists before running install_repo_script.
