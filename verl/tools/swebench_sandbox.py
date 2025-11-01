@@ -734,7 +734,14 @@ class SWEbenchSandboxTool(BaseTool):
             return ToolResponse(text="Missing 'command' parameter for run_shell."), 0.0, {"status": "invalid_command"}
 
         # Use per-request worktree if available
-        cwd = record.get("worktree_path", self.repo_path)
+        worktree_path = record.get("worktree_path")
+        cwd = worktree_path or self.repo_path
+        # Rewrite absolute repo paths in the command when using worktrees
+        if self.worktree_mode and worktree_path and self.repo_path and self.repo_path in command:
+            try:
+                command = command.replace(self.repo_path, worktree_path)
+            except Exception:
+                pass
         formatted_command = f"bash -lc {json.dumps(command)}"
         result = self._run_command(
             sandbox,
@@ -764,10 +771,13 @@ class SWEbenchSandboxTool(BaseTool):
         if not path:
             return ToolResponse(text="Missing 'path' parameter for read_file."), 0.0, {"status": "invalid_path"}
 
-        # Resolve relative paths against worktree/repo root
+        # Resolve relative paths against worktree/repo root; rewrite absolute /workspace/testbed to worktree.
+        worktree_path = record.get("worktree_path")
         if not path.startswith("/"):
-            base_dir = record.get("worktree_path", self.repo_path)
+            base_dir = worktree_path or self.repo_path
             path = posixpath.join(base_dir, path)
+        elif self.worktree_mode and worktree_path and path.startswith(self.repo_path.rstrip("/")):
+            path = worktree_path + path[len(self.repo_path):]
 
         try:
             content = sandbox.files.read(path)
@@ -809,9 +819,12 @@ class SWEbenchSandboxTool(BaseTool):
                 {"status": "invalid_parameters"},
             )
 
+        worktree_path = record.get("worktree_path")
         if not path.startswith("/"):
-            base_dir = record.get("worktree_path", self.repo_path)
+            base_dir = worktree_path or self.repo_path
             path = posixpath.join(base_dir, path)
+        elif self.worktree_mode and worktree_path and path.startswith(self.repo_path.rstrip("/")):
+            path = worktree_path + path[len(self.repo_path):]
 
         try:
             sandbox.files.write(path, content)
