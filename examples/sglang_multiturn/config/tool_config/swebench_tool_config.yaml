@@ -13,7 +13,9 @@ tools:
     repo_path: /workspace/testbed
     log_dir: tmp/verl_swebench_logs
     enable_e2b: true
-    template: swebench-django-fast
+    template: swebench-conda
+    worktree_mode: true
+    worktree_root: /workspace/worktrees
   tool_schema:
     type: function
     function:

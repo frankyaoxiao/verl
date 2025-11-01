@@ -24,6 +24,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
+import threading
+import posixpath
 
 from dotenv import dotenv_values
 
@@ -137,6 +139,14 @@ class SWEbenchSandboxTool(BaseTool):
             self.log_dir.mkdir(parents=True, exist_ok=True)
         self.model_name = config.get("model_name", "verl_agent")
 
+        # Worktree mode settings for per-question persistent sandboxes.
+        self.worktree_mode: bool = config.get("worktree_mode", False)
+        self.worktree_root: str = config.get("worktree_root", posixpath.join(self.workspace, "worktrees"))
+        self._canonicals_lock = threading.Lock()
+        self._canonicals: dict[str, dict[str, Any]] = {}
+        self._req_to_canon: dict[str, str] = {}
+        self._req_worktrees: dict[str, str] = {}
+
     def get_openai_tool_schema(self) -> OpenAIFunctionToolSchema:  # noqa: D401
         return self.tool_schema
 
@@ -196,10 +206,111 @@ class SWEbenchSandboxTool(BaseTool):
         sandbox: Optional[E2BSandbox] = None
         stage_logs: list[str] = []
 
-        # Define the entire synchronous setup sequence that should run in a thread
+        def _ensure_canonical_and_worktree():
+            nonlocal sandbox, stage_logs
+            canonical_id = dataset_instance.get("instance_id", instance_id)
+            # Create per-canonical entry and lock if absent
+            with self._canonicals_lock:
+                if canonical_id not in self._canonicals:
+                    self._canonicals[canonical_id] = {"lock": threading.Lock(), "initialized": False}
+            canonical = self._canonicals[canonical_id]
+            with canonical["lock"]:
+                if not canonical.get("initialized", False):
+                    t_start = time.time()
+                    LOGGER.info(f"[TIMING] {canonical_id[:8]} - Starting E2B sandbox creation")
+                    sbox = E2BSandbox.create(**sandbox_kwargs)
+                    canonical.update(
+                        {
+                            "sandbox": sbox,
+                            "refcount": 0,
+                            "root_repo_path": self.repo_path,
+                            "worktree_root": self.worktree_root,
+                        }
+                    )
+                    LOGGER.info(
+                        f"[TIMING] {canonical_id[:8]} - E2B sandbox created in {time.time() - t_start:.2f}s"
+                    )
+                    # Prepare workspace and ToS
+                    self._run_command(sbox, f"mkdir -p {self.workspace}", timeout=60, desc="prepare workspace")
+                    self._run_command(sbox, f"mkdir -p {self.worktree_root}", timeout=60, desc="prepare worktree root")
+                    tos_cmd = (
+                        "bash -lc '"
+                        "source /opt/miniconda3/etc/profile.d/conda.sh && "
+                        "conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && "
+                        "conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r'"
+                    )
+                    tos_result = self._run_command(
+                        sbox, tos_cmd, timeout=120, desc="Accept conda ToS", allow_error=True
+                    )
+                    stage_logs.append(self._format_stage("Conda terms acceptance", tos_result))
+                    # Env setup
+                    t_env_start = time.time()
+                    LOGGER.info(f"[TIMING] {canonical_id[:8]} - Starting environment setup")
+                    env_result = self._run_script(
+                        sbox,
+                        script_content=test_spec.setup_env_script,
+                        remote_name="setup_env.sh",
+                        timeout=self.env_setup_timeout_seconds,
+                        stage_name="Environment setup",
+                    )
+                    stage_logs.append(self._format_stage("Environment setup", env_result))
+                    LOGGER.info(
+                        f"[TIMING] {canonical_id[:8]} - Environment setup completed in {time.time() - t_env_start:.2f}s"
+                    )
+                    # Repo install once
+                    self._run_command(
+                        sbox, f"rm -rf {self.repo_path}", timeout=60, desc="clean testbed directory", allow_error=True
+                    )
+                    t_repo_start = time.time()
+                    LOGGER.info(f"[TIMING] {canonical_id[:8]} - Starting repository setup")
+                    repo_result = self._run_script(
+                        sbox,
+                        script_content=test_spec.install_repo_script,
+                        remote_name="install_repo.sh",
+                        timeout=self.repo_setup_timeout_seconds,
+                        stage_name="Repository setup",
+                    )
+                    stage_logs.append(self._format_stage("Repository setup", repo_result))
+                    LOGGER.info(
+                        f"[TIMING] {canonical_id[:8]} - Repository setup completed in {time.time() - t_repo_start:.2f}s"
+                    )
+                    canonical["initialized"] = True
+                    self._persist_logs(canonical_id, "setup", "\n\n".join(stage_logs))
+
+                # Add a per-request worktree for this repeat
+                sbox = canonical["sandbox"]
+                worktree_path = posixpath.join(self.worktree_root, instance_id)
+                base_commit = dataset_instance["base_commit"]
+                self._run_command(sbox, f"mkdir -p {self.worktree_root}", timeout=60, desc="mkdir worktrees root")
+                add_cmd = f"git -C {self.repo_path} worktree add -f {worktree_path} {base_commit}"
+                wt_add = self._run_command(
+                    sbox, add_cmd, timeout=self.repo_setup_timeout_seconds, desc="Add worktree", allow_error=True
+                )
+                if wt_add.exit_code != 0:
+                    self._run_command(
+                        sbox, f"git -C {self.repo_path} worktree prune", timeout=120, desc="Prune worktrees", allow_error=True
+                    )
+                    self._run_command(
+                        sbox, add_cmd, timeout=self.repo_setup_timeout_seconds, desc="Add worktree (retry)", allow_error=False
+                    )
+                self._run_command(
+                    sbox,
+                    f"git config --global --add safe.directory {worktree_path}",
+                    timeout=60,
+                    desc="Mark worktree safe",
+                    allow_error=True,
+                )
+                canonical["refcount"] = canonical.get("refcount", 0) + 1
+                self._req_to_canon[instance_id] = canonical_id
+                self._req_worktrees[instance_id] = worktree_path
+                record["sandbox"] = sbox
+                record["worktree_path"] = worktree_path
+                record["canonical_id"] = canonical_id
+                self._instances[instance_id] = record
+
+        # Legacy single-sandbox setup per request
         def _do_setup():
             nonlocal sandbox, stage_logs
-            
             # Create sandbox (synchronous)
             t_start = time.time()
             LOGGER.info(f"[TIMING] {instance_id[:8]} - Starting E2B sandbox creation")
@@ -214,9 +325,6 @@ class SWEbenchSandboxTool(BaseTool):
                 timeout=60,
                 desc="prepare workspace",
             )
-            # NOTE: Do NOT create repo_path directory here! The install_repo_script
-            # will create it via git clone. Pre-creating it causes "directory exists" errors.
-
             # Accept conda terms (best-effort).
             tos_cmd = (
                 "bash -lc '"
@@ -246,8 +354,6 @@ class SWEbenchSandboxTool(BaseTool):
             LOGGER.info(f"[TIMING] {instance_id[:8]} - Environment setup completed in {time.time() - t_env_start:.2f}s")
 
             # Safety: Remove repo_path if it exists before running install_repo_script.
-            # The script expects to git clone into an empty/non-existent directory.
-            # This handles edge cases where the directory might be created by env setup or other scripts.
             self._run_command(
                 sandbox,
                 f"rm -rf {self.repo_path}",
@@ -273,11 +379,17 @@ class SWEbenchSandboxTool(BaseTool):
             self._instances[instance_id] = record
 
         try:
-            # Run the entire blocking setup sequence in a thread pool to avoid blocking event loop
-            # This allows multiple sandboxes to be created AND set up in parallel
             t_total_start = time.time()
-            LOGGER.info(f"[TIMING] {instance_id[:8]} - Starting complete sandbox setup (create + env + repo)")
-            await asyncio.to_thread(_do_setup)
+            if self.worktree_mode:
+                LOGGER.info(
+                    f"[TIMING] {instance_id[:8]} - Starting canonical/worktree setup (worktree_mode=True)"
+                )
+                await asyncio.to_thread(_ensure_canonical_and_worktree)
+            else:
+                LOGGER.info(
+                    f"[TIMING] {instance_id[:8]} - Starting complete sandbox setup (create + env + repo)"
+                )
+                await asyncio.to_thread(_do_setup)
             total_elapsed = time.time() - t_total_start
             LOGGER.info(f"[TIMING] {instance_id[:8]} - Total sandbox setup completed in {total_elapsed:.2f}s")
 
@@ -340,6 +452,40 @@ class SWEbenchSandboxTool(BaseTool):
         record = self._instances.pop(instance_id, None)
         if not record:
             return
+        if self.worktree_mode and self.enable_e2b:
+            canonical_id = record.get("canonical_id") or self._req_to_canon.pop(instance_id, None)
+            worktree_path = record.get("worktree_path") or self._req_worktrees.pop(instance_id, None)
+            if canonical_id is None:
+                return
+            canonical = self._canonicals.get(canonical_id)
+            if canonical is None:
+                return
+            sbox: Optional[E2BSandbox] = canonical.get("sandbox")
+            with canonical["lock"]:
+                if sbox is not None and worktree_path:
+                    try:
+                        self._run_command(
+                            sbox,
+                            f"git -C {self.repo_path} worktree remove -f {worktree_path}",
+                            timeout=120,
+                            desc="Remove worktree",
+                            allow_error=True,
+                        )
+                        self._run_command(
+                            sbox, f"git -C {self.repo_path} worktree prune", timeout=60, desc="Prune worktrees", allow_error=True
+                        )
+                    except Exception:  # pragma: no cover
+                        LOGGER.exception("Failed to remove worktree %s", worktree_path)
+                canonical["refcount"] = max(0, canonical.get("refcount", 1) - 1)
+                if canonical["refcount"] == 0 and sbox is not None:
+                    try:
+                        sbox.kill()
+                    except Exception:  # pragma: no cover
+                        LOGGER.exception("Failed to close canonical sandbox for %s", canonical_id)
+                    self._canonicals.pop(canonical_id, None)
+            return
+
+        # Legacy one-sandbox-per-request behavior
         sandbox: Optional[E2BSandbox] = record.get("sandbox")
         if sandbox is not None:
             try:
@@ -587,8 +733,8 @@ class SWEbenchSandboxTool(BaseTool):
         if not command:
             return ToolResponse(text="Missing 'command' parameter for run_shell."), 0.0, {"status": "invalid_command"}
 
-        # Always use repo_path as working directory
-        cwd = self.repo_path
+        # Use per-request worktree if available
+        cwd = record.get("worktree_path", self.repo_path)
         formatted_command = f"bash -lc {json.dumps(command)}"
         result = self._run_command(
             sandbox,
@@ -617,6 +763,11 @@ class SWEbenchSandboxTool(BaseTool):
         path = parameters.get("path")
         if not path:
             return ToolResponse(text="Missing 'path' parameter for read_file."), 0.0, {"status": "invalid_path"}
+
+        # Resolve relative paths against worktree/repo root
+        if not path.startswith("/"):
+            base_dir = record.get("worktree_path", self.repo_path)
+            path = posixpath.join(base_dir, path)
 
         try:
             content = sandbox.files.read(path)
@@ -658,6 +809,10 @@ class SWEbenchSandboxTool(BaseTool):
                 {"status": "invalid_parameters"},
             )
 
+        if not path.startswith("/"):
+            base_dir = record.get("worktree_path", self.repo_path)
+            path = posixpath.join(base_dir, path)
+
         try:
             sandbox.files.write(path, content)
         except Exception as exc:  # pragma: no cover - depends on remote FS
@@ -694,7 +849,8 @@ class SWEbenchSandboxTool(BaseTool):
         dataset_instance = record["dataset_instance"]
         stage_logs: list[str] = []
 
-        repo_path = self.repo_path
+        # Use per-request worktree directory if present
+        repo_path = record.get("worktree_path", self.repo_path)
         base_commit = dataset_instance["base_commit"]
 
         # Clean working tree before applying patch.
@@ -713,7 +869,7 @@ class SWEbenchSandboxTool(BaseTool):
             )
             stage_logs.append(self._format_stage("Repository prepare", result))
 
-        patch_remote_path = self._remote_path("candidate.patch")
+        patch_remote_path = posixpath.join(repo_path, "candidate.patch")
         self._write_remote_file(sandbox, patch_remote_path, patch)
 
         patch_check = self._run_command(
@@ -744,9 +900,11 @@ class SWEbenchSandboxTool(BaseTool):
         )
         stage_logs.append(self._format_stage("Patch apply", patch_apply))
 
+        # Re-target eval script to use the worktree path as repo directory
+        eval_script = test_spec.eval_script.replace(self.repo_path, repo_path)
         eval_result = self._run_script(
             sandbox,
-            script_content=test_spec.eval_script,
+            script_content=eval_script,
             remote_name="run_eval.sh",
             timeout=self.eval_timeout_seconds,
             stage_name="Evaluation",
