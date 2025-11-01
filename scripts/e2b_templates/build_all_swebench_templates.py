@@ -139,7 +139,9 @@ def build_all_templates(cfg: BuildConfig) -> None:
             dockerfile += "\n" + f"""
 # --- SWEbench environment (environment.yml) ---
 USER root
-RUN bash -lc "cat > /root/environment.yml <<'EOF_ENV'\n{env_yml}\nEOF_ENV"
+RUN cat > /root/environment.yml <<'EOF_ENV'
+{env_yml}
+EOF_ENV
 RUN bash -lc "source {cfg.conda_prefix}/bin/activate && conda env create -f /root/environment.yml"
 """
             if python_ver:
@@ -151,7 +153,9 @@ RUN bash -lc "source {cfg.conda_prefix}/bin/activate && conda env create -f /roo
 # --- SWEbench environment (requirements.txt) ---
 USER root
 RUN bash -lc "source {cfg.conda_prefix}/bin/activate && conda create -n {cfg.env_name} python={python_ver} -y"
-RUN bash -lc "cat > /root/requirements.txt <<'EOF_REQ'\n{reqs_text}\nEOF_REQ"
+RUN cat > /root/requirements.txt <<'EOF_REQ'
+{reqs_text}
+EOF_REQ
 RUN bash -lc "source {cfg.conda_prefix}/bin/activate && conda activate {cfg.env_name} && python -m pip install -r /root/requirements.txt"
 USER user
 """
