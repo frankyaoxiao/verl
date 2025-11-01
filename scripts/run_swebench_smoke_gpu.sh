@@ -38,6 +38,21 @@ export SWEBENCH_PREWARMED=${SWEBENCH_PREWARMED:-1}
 # If unset, the tool config falls back to the default alias.
 # Example: export SWEBENCH_TEMPLATE_ALIAS="swebench-mini-OWNER_REPO-<hash>"
 export SWEBENCH_TEMPLATE_ALIAS=${SWEBENCH_TEMPLATE_ALIAS:-}
+export SWEBENCH_TEMPLATES_ENABLE=${SWEBENCH_TEMPLATES_ENABLE:-1}
+export SWEBENCH_ALIAS_PREFIX=${SWEBENCH_ALIAS_PREFIX:-swebench-mini}
+
+# If a prebuilt template alias is provided, use the conventional /workspace layout
+if [[ -n "${SWEBENCH_TEMPLATE_ALIAS}" ]]; then
+  export SWEBENCH_WORKDIR=${SWEBENCH_WORKDIR:-/workspace}
+  export SWEBENCH_REPO_PATH=${SWEBENCH_REPO_PATH:-/workspace/testbed}
+  export SWEBENCH_WORKTREE_ROOT=${SWEBENCH_WORKTREE_ROOT:-/workspace/worktrees}
+  export SWEBENCH_PREWARM_ENV_NAME=${SWEBENCH_PREWARM_ENV_NAME:-testbed}
+fi
+
+echo "[debug] SWEbench template alias: ${SWEBENCH_TEMPLATE_ALIAS:-<unset>}"
+echo "[debug] SWEbench prewarmed: ${SWEBENCH_PREWARMED:-0}, env: ${SWEBENCH_PREWARM_ENV_NAME:-testbed}"
+echo "[debug] SWEbench paths: workdir=${SWEBENCH_WORKDIR:-<unset>} repo_path=${SWEBENCH_REPO_PATH:-<unset>} worktree_root=${SWEBENCH_WORKTREE_ROOT:-<unset>}"
+echo "[debug] SWEbench per-instance templates: enable=${SWEBENCH_TEMPLATES_ENABLE} prefix=${SWEBENCH_ALIAS_PREFIX}"
 
 # Enable full conversation logging for debugging (saved to tmp/conversations/)
 export VERL_CONVERSATION_DUMP_DIR=${VERL_CONVERSATION_DUMP_DIR:-tmp/conversations}
@@ -72,3 +87,9 @@ export SWEBENCH_MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH}
   actor_rollout_ref.rollout.prompt_length=${MAX_PROMPT_LENGTH} \
   actor_rollout_ref.rollout.response_length=${MAX_RESPONSE_LENGTH} \
   actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH}
+
+# Best-effort cleanup of lingering E2B sandboxes to avoid hitting concurrency limits.
+if [[ "${SWEBENCH_E2B_CLEANUP:-1}" == "1" ]]; then
+  echo "[post] Cleaning up E2B sandboxes (best effort)"
+  python3 scripts/cleanup_e2b_sandboxes.py || true
+fi

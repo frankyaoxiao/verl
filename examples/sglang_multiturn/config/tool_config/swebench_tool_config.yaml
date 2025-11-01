@@ -3,21 +3,21 @@ tools:
   config:
     type: native
     docker_image: swebench/base:latest
-    workdir: /workspace
+    workdir: ${oc.env:SWEBENCH_WORKDIR,/home/user}
     repo_cache: ~/swebench_repo_cache
     timeout_seconds: 900
     install_timeout_seconds: 600
     env_setup_timeout_seconds: 1200
     repo_setup_timeout_seconds: 900
     eval_timeout_seconds: 900
-    repo_path: /workspace/testbed
+    repo_path: ${oc.env:SWEBENCH_REPO_PATH,/home/user/testbed}
     log_dir: tmp/verl_swebench_logs
     enable_e2b: true
     template: ${oc.env:SWEBENCH_TEMPLATE_ALIAS,swebench-conda}
     prewarm: ${oc.env:SWEBENCH_PREWARMED,0}
     prewarm_env_name: ${oc.env:SWEBENCH_PREWARM_ENV_NAME,testbed}
     worktree_mode: true
-    worktree_root: /workspace/worktrees
+    worktree_root: ${oc.env:SWEBENCH_WORKTREE_ROOT,/home/user/worktrees}
   tool_schema:
     type: function
     function:

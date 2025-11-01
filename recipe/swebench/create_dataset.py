@@ -21,15 +21,18 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
+import os
 from datasets import Dataset, load_dataset
+from swebench.harness.test_spec.test_spec import make_test_spec, TestSpec
 
 DEFAULT_DATASET = "MariusHobbhahn/swe-bench-verified-mini"
+_REPO_ROOT = os.getenv("SWEBENCH_REPO_PATH", "/workspace/testbed")
 SYSTEM_PROMPT = (
     "You are an autonomous software engineer tasked with resolving issues in real-world repositories. "
     "Your workspace is a persistent SWEbench sandbox that you can access via the `run_swebench_tests` tool. "
     "Use the tool with different actions to explore and validate your work:\n"
     "- `action=\"run_shell\"`: run shell commands (e.g., inspect files, run tests). "
-    "Each command starts fresh in the repository root (/workspace/testbed), so use `cd dir && command` if you need to work in subdirectories.\n"
+    f"Each command starts fresh in the repository root ({_REPO_ROOT}), so use `cd dir && command` if you need to work in subdirectories.\n"
     "- `action=\"read_file\"` / `action=\"write_file\"`: read or modify files inside the sandbox.\n"
     "- `action=\"submit_patch\"`: apply your final diff, run the official SWEbench judge, and end the sandbox session.\n\n"
     "Important: Shell state (like current directory) doesn't persist between commands. "
@@ -107,22 +110,42 @@ def build_chat_messages(example: dict[str, Any]) -> list[dict[str, str]]:
 
 def build_tools_kwargs(example: dict[str, Any]) -> dict[str, Any]:
     """Construct per-instance tool kwargs for the SWEbench sandbox tool."""
+    # Optional per-instance template alias injection for prewarmed templates
+    template_alias: str | None = None
+    try:
+        enable_templates = bool(int(os.getenv("SWEBENCH_TEMPLATES_ENABLE", "0")))
+    except Exception:
+        enable_templates = False
+    if enable_templates:
+        try:
+            spec: TestSpec = make_test_spec(example)
+            env_key = spec.env_image_key  # sweb.env.*.<HASH>:tag
+            short_hash = env_key.split(":", 1)[0].split(".")[-1][:10]
+            repo = example["repo"].replace("/", "_")
+            alias_prefix = os.getenv("SWEBENCH_ALIAS_PREFIX", "swebench")
+            template_alias = f"{alias_prefix}-{repo}-{short_hash}"
+        except Exception:
+            template_alias = None
+
+    create_kwargs = {
+        "repo": example["repo"],
+        "instance_id": example["instance_id"],
+        "base_commit": example["base_commit"],
+        "environment_setup_commit": example.get("environment_setup_commit"),
+        "version": example.get("version"),
+        "fail_to_pass": example.get("FAIL_TO_PASS", []),
+        "pass_to_pass": example.get("PASS_TO_PASS", []),
+        "patch": example.get("patch"),
+        "test_patch": example.get("test_patch"),
+        "problem_statement": example.get("problem_statement"),
+        "dataset_instance": example,
+    }
+    if template_alias:
+        create_kwargs["template"] = template_alias
 
     return {
         "run_swebench_tests": {
-            "create_kwargs": {
-                "repo": example["repo"],
-                "instance_id": example["instance_id"],
-                "base_commit": example["base_commit"],
-                "environment_setup_commit": example.get("environment_setup_commit"),
-                "version": example.get("version"),
-                "fail_to_pass": example.get("FAIL_TO_PASS", []),
-                "pass_to_pass": example.get("PASS_TO_PASS", []),
-                "patch": example.get("patch"),
-                "test_patch": example.get("test_patch"),
-                "problem_statement": example.get("problem_statement"),
-                "dataset_instance": example,
-            },
+            "create_kwargs": create_kwargs,
         }
     }
 

@@ -28,6 +28,7 @@ import threading
 import posixpath
 
 from dotenv import dotenv_values
+from types import SimpleNamespace
 
 from e2b_code_interpreter import Sandbox as E2BSandbox
 from e2b.sandbox_sync.commands.command_handle import CommandExitException, CommandResult
@@ -246,9 +247,24 @@ class SWEbenchSandboxTool(BaseTool):
         chosen_template = create_kwargs_template or req_template or self.template
         if chosen_template:
             sandbox_kwargs["template"] = chosen_template
+        # Log and stage configuration summary for debugging
+        config_summary = textwrap.dedent(
+            f"""
+            Configuration
+            template: {chosen_template or '(default)'}
+            prewarm: {self.prewarm} (env={self.prewarm_env_name})
+            workspace: {self.workspace}
+            repo_path: {self.repo_path}
+            worktree_mode: {self.worktree_mode}
+            worktree_root: {self.worktree_root}
+            timeout: {self.timeout_seconds}s
+            """
+        ).strip()
+        LOGGER.info(config_summary.replace("\n", " | "))
 
         sandbox: Optional[E2BSandbox] = None
         stage_logs: list[str] = []
+        stage_logs.append(config_summary)
 
         def _ensure_canonical_and_worktree():
             nonlocal sandbox, stage_logs
@@ -292,12 +308,10 @@ class SWEbenchSandboxTool(BaseTool):
                     LOGGER.info(f"[TIMING] {canonical_id[:8]} - Starting environment setup")
                     if self.prewarm and self._env_exists(sbox):
                         # Skip running env script if template is pre-warmed.
-                        env_result = CommandResult(
-                            command="(skipped)",
+                        env_result = SimpleNamespace(
                             exit_code=0,
                             stdout=f"Prewarmed env '{self.prewarm_env_name}' detected; skipping env setup.",
                             stderr="",
-                            time=0.0,
                         )
                     else:
                         env_result = self._run_script(
@@ -398,12 +412,10 @@ class SWEbenchSandboxTool(BaseTool):
             t_env_start = time.time()
             LOGGER.info(f"[TIMING] {instance_id[:8]} - Starting environment setup")
             if self.prewarm and self._env_exists(sandbox):
-                env_result = CommandResult(
-                    command="(skipped)",
+                env_result = SimpleNamespace(
                     exit_code=0,
                     stdout=f"Prewarmed env '{self.prewarm_env_name}' detected; skipping env setup.",
                     stderr="",
-                    time=0.0,
                 )
             else:
                 env_result = self._run_script(
@@ -700,12 +712,10 @@ class SWEbenchSandboxTool(BaseTool):
             stage_logs.append(self._format_stage("Conda terms acceptance", tos_result))
 
             if self.prewarm and self._env_exists(sandbox):
-                env_result = CommandResult(
-                    command="(skipped)",
+                env_result = SimpleNamespace(
                     exit_code=0,
                     stdout=f"Prewarmed env '{self.prewarm_env_name}' detected; skipping env setup.",
                     stderr="",
-                    time=0.0,
                 )
             else:
                 env_result = self._run_script(
