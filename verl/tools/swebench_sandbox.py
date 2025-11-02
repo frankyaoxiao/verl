@@ -127,6 +127,9 @@ class SWEbenchSandboxTool(BaseTool):
         self.template = config.get("template")
         self.workspace = config.get("workdir", "/workspace")
         self.repo_path = config.get("repo_path", "/testbed")
+        # Auto template selection
+        self.auto_template: bool = bool(config.get("auto_template", False))
+        self.alias_prefix: str = config.get("alias_prefix", "swebench")
         # Optional: pre-warmed environment skip. If enabled and an environment
         # named `prewarm_env_name` already exists, skip running the harness
         # env setup script to save time (templates may bake the env already).
@@ -157,6 +160,19 @@ class SWEbenchSandboxTool(BaseTool):
         self._canonicals: dict[str, dict[str, Any]] = {}
         self._req_to_canon: dict[str, str] = {}
         self._req_worktrees: dict[str, str] = {}
+
+    @staticmethod
+    def _short_env_hash(env_image_key: str) -> str:
+        try:
+            core = env_image_key.split(":", 1)[0]
+            parts = core.split(".")
+            return parts[-1][:10]
+        except Exception:
+            return "unknownhash"
+
+    @staticmethod
+    def _safe_repo_alias(repo: str) -> str:
+        return repo.replace("/", "_")
 
     def _env_exists(self, sandbox: E2BSandbox) -> bool:
         """Check whether the pre-warmed conda env exists in the sandbox.
@@ -244,9 +260,36 @@ class SWEbenchSandboxTool(BaseTool):
         create_kwargs_template = None
         if isinstance(kwargs.get("create_kwargs"), dict):
             create_kwargs_template = kwargs["create_kwargs"].get("template")
-        chosen_template = create_kwargs_template or req_template or self.template
+        # Treat empty config template as unset so defaults can apply
+        cfg_tmpl = self.template if (isinstance(self.template, str) and self.template.strip()) else None
+        chosen_template = create_kwargs_template or req_template or cfg_tmpl
+
+        # If we already have a chosen template (request or config), pass it to sandbox creation
         if chosen_template:
             sandbox_kwargs["template"] = chosen_template
+
+        # Auto-select a per-repo template if enabled and no explicit override provided
+        used_auto_template = False
+        auto_alias = None
+        original_paths = (self.workspace, self.repo_path, self.worktree_root)
+        if not (create_kwargs_template or req_template) and self.auto_template:
+            try:
+                env_key = test_spec.env_image_key
+                repo = dataset_instance.get("repo")
+                if env_key and repo:
+                    env_hash = self._short_env_hash(env_key)
+                    auto_alias = f"{self.alias_prefix}-{self._safe_repo_alias(repo)}-{env_hash}"
+                    sandbox_kwargs["template"] = auto_alias
+                    chosen_template = auto_alias
+                    used_auto_template = True
+                    # When using a prewarmed per-repo template, prefer /workspace layout
+                    self.workspace = "/workspace"
+                    self.repo_path = posixpath.join(self.workspace, "testbed")
+                    self.worktree_root = posixpath.join(self.workspace, "worktrees")
+            except Exception:
+                # Best-effort: if anything fails, keep defaults and fall back later
+                auto_alias = None
+                used_auto_template = False
         # Log and stage configuration summary for debugging
         config_summary = textwrap.dedent(
             f"""
@@ -261,6 +304,19 @@ class SWEbenchSandboxTool(BaseTool):
             """
         ).strip()
         LOGGER.info(config_summary.replace("\n", " | "))
+
+        # Extra selection diagnostics
+        LOGGER.info(
+            "[template-selection] req_template=%s create_kwargs_template=%s config_template=%s auto_template=%s "
+            "computed_auto_alias=%s used_auto=%s final_template=%s",
+            req_template,
+            create_kwargs_template,
+            self.template,
+            self.auto_template,
+            auto_alias,
+            used_auto_template,
+            chosen_template,
+        )
 
         sandbox: Optional[E2BSandbox] = None
         stage_logs: list[str] = []
@@ -278,7 +334,45 @@ class SWEbenchSandboxTool(BaseTool):
                 if not canonical.get("initialized", False):
                     t_start = time.time()
                     LOGGER.info(f"[TIMING] {canonical_id[:8]} - Starting E2B sandbox creation")
-                    sbox = E2BSandbox.create(**sandbox_kwargs)
+                    # Try creating sandbox; if auto-template fails, fall back to default template
+                    try:
+                        sbox = E2BSandbox.create(**sandbox_kwargs)
+                    except Exception as exc:
+                        if used_auto_template and self.template and sandbox_kwargs.get("template") != self.template:
+                            LOGGER.info(
+                                f"[INFO] Auto template '{sandbox_kwargs.get('template')}' failed ({exc}); falling back to '{self.template}'"
+                            )
+                            # Restore original paths for default template layout if we changed them
+                            self.workspace, self.repo_path, self.worktree_root = original_paths
+                            sandbox_kwargs["template"] = self.template
+                            sbox = E2BSandbox.create(**sandbox_kwargs)
+                        else:
+                            raise
+                    LOGGER.info(
+                        "[SANDBOX] Created template=%s workspace=%s repo_path=%s worktree_root=%s",
+                        sandbox_kwargs.get("template"),
+                        self.workspace,
+                        self.repo_path,
+                        self.worktree_root,
+                    )
+                    # Quick env diagnostics inside sandbox (best-effort)
+                    mc = self._run_command(
+                        sbox,
+                        "bash -lc 'test -d /opt/miniconda3 && echo HAS_MINICONDA || echo NO_MINICONDA'",
+                        timeout=30,
+                        desc="check miniconda",
+                        allow_error=True,
+                    )
+                    LOGGER.info("[ENV] /opt/miniconda3 present: %s", "HAS_MINICONDA" in (mc.stdout or ""))
+                    try:
+                        prewarm_present = self._env_exists(sbox)
+                    except Exception:
+                        prewarm_present = False
+                    LOGGER.info(
+                        "[ENV] prewarmed_env('%s') present: %s",
+                        self.prewarm_env_name,
+                        prewarm_present,
+                    )
                     canonical.update(
                         {
                             "sandbox": sbox,
@@ -308,11 +402,9 @@ class SWEbenchSandboxTool(BaseTool):
                     LOGGER.info(f"[TIMING] {canonical_id[:8]} - Starting environment setup")
                     if self.prewarm and self._env_exists(sbox):
                         # Skip running env script if template is pre-warmed.
-                        env_result = SimpleNamespace(
-                            exit_code=0,
-                            stdout=f"Prewarmed env '{self.prewarm_env_name}' detected; skipping env setup.",
-                            stderr="",
-                        )
+                        msg = f"Prewarmed env '{self.prewarm_env_name}' detected; skipping env setup."
+                        LOGGER.info("[ENV] %s", msg)
+                        env_result = SimpleNamespace(exit_code=0, stdout=msg, stderr="")
                     else:
                         env_result = self._run_script(
                             sbox,
@@ -325,20 +417,52 @@ class SWEbenchSandboxTool(BaseTool):
                     LOGGER.info(
                         f"[TIMING] {canonical_id[:8]} - Environment setup completed in {time.time() - t_env_start:.2f}s"
                     )
-                    # Repo install once
+                    # Repo install once (fast path via local mirror if available)
                     self._run_command(
                         sbox, f"rm -rf {self.repo_path}", timeout=60, desc="clean testbed directory", allow_error=True
                     )
                     t_repo_start = time.time()
                     LOGGER.info(f"[TIMING] {canonical_id[:8]} - Starting repository setup")
-                    repo_result = self._run_script(
-                        sbox,
-                        script_content=test_spec.install_repo_script,
-                        remote_name="install_repo.sh",
-                        timeout=self.repo_setup_timeout_seconds,
-                        stage_name="Repository setup",
-                    )
-                    stage_logs.append(self._format_stage("Repository setup", repo_result))
+                    owner_repo = dataset_instance.get("repo")
+                    mirror_path = posixpath.join("/opt/mirror", owner_repo + ".git") if owner_repo else None
+                    fast_repo_ok = False
+                    if mirror_path:
+                        check = self._run_command(
+                            sbox,
+                            f"bash -lc 'test -d {mirror_path}'",
+                            timeout=30,
+                            desc="check mirror",
+                            allow_error=True,
+                        )
+                        if check.exit_code == 0:
+                            cmds = [
+                                # Mark the mirror path as safe to satisfy git's ownership checks
+                                f"git config --global --add safe.directory {mirror_path}",
+                                f"git clone --shared {mirror_path} {self.repo_path}",
+                                f"git -C {self.repo_path} reset --hard {dataset_instance['base_commit']}",
+                                f"git -C {self.repo_path} remote remove origin || true",
+                                f"git -C {self.repo_path} config --global --add safe.directory {self.repo_path}",
+                            ]
+                            for c in cmds:
+                                res = self._run_command(
+                                    sbox,
+                                    c,
+                                    timeout=self.repo_setup_timeout_seconds,
+                                    desc=f"Fast repo setup ({c})",
+                                    cwd=self.workspace,
+                                    allow_error=False,
+                                )
+                                stage_logs.append(self._format_stage("Repository setup (fast)", res))
+                            fast_repo_ok = True
+                    if not fast_repo_ok:
+                        repo_result = self._run_script(
+                            sbox,
+                            script_content=test_spec.install_repo_script,
+                            remote_name="install_repo.sh",
+                            timeout=self.repo_setup_timeout_seconds,
+                            stage_name="Repository setup",
+                        )
+                        stage_logs.append(self._format_stage("Repository setup", repo_result))
                     LOGGER.info(
                         f"[TIMING] {canonical_id[:8]} - Repository setup completed in {time.time() - t_repo_start:.2f}s"
                     )
@@ -382,9 +506,27 @@ class SWEbenchSandboxTool(BaseTool):
             # Create sandbox (synchronous)
             t_start = time.time()
             LOGGER.info(f"[TIMING] {instance_id[:8]} - Starting E2B sandbox creation")
-            sandbox = E2BSandbox.create(**sandbox_kwargs)
+            try:
+                sandbox = E2BSandbox.create(**sandbox_kwargs)
+            except Exception as exc:
+                if used_auto_template and self.template and sandbox_kwargs.get("template") != self.template:
+                    LOGGER.info(
+                        f"[INFO] Auto template '{sandbox_kwargs.get('template')}' failed ({exc}); falling back to '{self.template}'"
+                    )
+                    self.workspace, self.repo_path, self.worktree_root = original_paths
+                    sandbox_kwargs["template"] = self.template
+                    sandbox = E2BSandbox.create(**sandbox_kwargs)
+                else:
+                    raise
             record["sandbox"] = sandbox
             LOGGER.info(f"[TIMING] {instance_id[:8]} - E2B sandbox created in {time.time() - t_start:.2f}s")
+            LOGGER.info(
+                "[SANDBOX] Created template=%s workspace=%s repo_path=%s worktree_root=%s",
+                sandbox_kwargs.get("template"),
+                self.workspace,
+                self.repo_path,
+                self.worktree_root,
+            )
 
             # Prepare workspace directory and permissions.
             self._run_command(
@@ -412,11 +554,9 @@ class SWEbenchSandboxTool(BaseTool):
             t_env_start = time.time()
             LOGGER.info(f"[TIMING] {instance_id[:8]} - Starting environment setup")
             if self.prewarm and self._env_exists(sandbox):
-                env_result = SimpleNamespace(
-                    exit_code=0,
-                    stdout=f"Prewarmed env '{self.prewarm_env_name}' detected; skipping env setup.",
-                    stderr="",
-                )
+                msg = f"Prewarmed env '{self.prewarm_env_name}' detected; skipping env setup."
+                LOGGER.info("[ENV] %s", msg)
+                env_result = SimpleNamespace(exit_code=0, stdout=msg, stderr="")
             else:
                 env_result = self._run_script(
                     sandbox,
@@ -726,26 +866,62 @@ class SWEbenchSandboxTool(BaseTool):
                     stage_name="Environment setup",
                 )
             stage_logs.append(self._format_stage("Environment setup", env_result))
-
-            # Safety: Remove repo_path if it exists before running install_repo_script.
-            # The script expects to git clone into an empty/non-existent directory.
-            # This handles edge cases where the directory might be created by env setup or other scripts.
-            self._run_command(
-                sandbox,
-                f"rm -rf {self.repo_path}",
-                timeout=60,
-                desc="clean testbed directory",
-                allow_error=True,
-            )
-
-            repo_result = self._run_script(
-                sandbox,
-                script_content=test_spec.install_repo_script,
-                remote_name="install_repo.sh",
-                timeout=self.repo_setup_timeout_seconds,
-                stage_name="Repository setup",
-            )
-            stage_logs.append(self._format_stage("Repository setup", repo_result))
+            # Try fast repo setup using local mirror if available; fall back to harness script otherwise.
+            owner_repo = dataset_instance.get("repo")
+            mirror_path = posixpath.join("/opt/mirror", owner_repo + ".git") if owner_repo else None
+            fast_repo_ok = False
+            if mirror_path:
+                # Check mirror existence
+                check = self._run_command(
+                    sandbox,
+                    f"bash -lc 'test -d {mirror_path}'",
+                    timeout=30,
+                    desc="check mirror",
+                    allow_error=True,
+                )
+                if check.exit_code == 0:
+                    # Clean any previous dir, then clone from mirror and reset to base_commit
+                    self._run_command(
+                        sandbox,
+                        f"rm -rf {self.repo_path}",
+                        timeout=60,
+                        desc="clean testbed directory",
+                        allow_error=True,
+                    )
+                    cmds = [
+                        f"git clone --shared {mirror_path} {self.repo_path}",
+                        f"git -C {self.repo_path} reset --hard {dataset_instance['base_commit']}",
+                        f"git -C {self.repo_path} remote remove origin || true",
+                        f"git -C {self.repo_path} config --global --add safe.directory {self.repo_path}",
+                    ]
+                    for c in cmds:
+                        res = self._run_command(
+                            sandbox,
+                            c,
+                            timeout=self.repo_setup_timeout_seconds,
+                            desc=f"Fast repo setup ({c})",
+                            cwd=self.workspace,
+                            allow_error=False,
+                        )
+                        stage_logs.append(self._format_stage("Repository setup (fast)", res))
+                    fast_repo_ok = True
+            if not fast_repo_ok:
+                # Safety: Remove repo_path if it exists before running install_repo_script.
+                self._run_command(
+                    sandbox,
+                    f"rm -rf {self.repo_path}",
+                    timeout=60,
+                    desc="clean testbed directory",
+                    allow_error=True,
+                )
+                repo_result = self._run_script(
+                    sandbox,
+                    script_content=test_spec.install_repo_script,
+                    remote_name="install_repo.sh",
+                    timeout=self.repo_setup_timeout_seconds,
+                    stage_name="Repository setup",
+                )
+                stage_logs.append(self._format_stage("Repository setup", repo_result))
 
             patch_remote_path = self._remote_path("candidate.patch")
             self._write_remote_file(sandbox, patch_remote_path, patch)

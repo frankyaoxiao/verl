@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional, Tuple
@@ -106,6 +107,19 @@ def _write_text(path: pathlib.Path, text: str):
     path.write_text(text)
 
 
+def _suppress_e2b_http_logs():
+    """Reduce verbosity from E2B SDK and httpx during template build polling.
+
+    Keeps build layer logs (default_build_logger) while hiding request/response spam.
+    """
+    try:
+        logging.getLogger("e2b.api").setLevel(logging.WARNING)
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+    except Exception:
+        pass
+
+
 def _iter_groups(dataset: str, split: str) -> Iterable[Tuple[str, str, dict]]:
     ds = load_dataset(dataset, split=split)
     groups: Dict[Tuple[str, str], dict] = {}
@@ -120,6 +134,7 @@ def _iter_groups(dataset: str, split: str) -> Iterable[Tuple[str, str, dict]]:
 
 def build_all_templates(cfg: BuildConfig) -> None:
     load_dotenv()
+    _suppress_e2b_http_logs()
 
     for repo, env_key, ex in _iter_groups(cfg.dataset, cfg.split):
         spec: TestSpec = make_test_spec(ex)
@@ -133,29 +148,40 @@ def build_all_templates(cfg: BuildConfig) -> None:
         pip_packages = specs.get("pip_packages")
 
         dockerfile = _render_dockerfile_base(cfg.conda_prefix, cfg.workdir)
+        # Prewarm a local mirror of the repository to avoid expensive network clones at runtime.
+        owner_repo = repo  # e.g., django/django
+        dockerfile += "\n" + f"""
+# --- SWEbench repository mirror ---
+USER root
+RUN mkdir -p $(dirname /opt/mirror/{owner_repo}.git) && \\
+    git -c protocol.version=2 clone --mirror https://github.com/{owner_repo}.git /opt/mirror/{owner_repo}.git
+USER user
+"""
 
         if packages == "environment.yml":
             env_yml = get_environment_yml(ex, cfg.env_name)
+            local_env_yml = pathlib.Path(cfg.artifacts_dir) / f"{_safe_repo_alias(repo)}_{env_hash}_environment.yml"
+            _write_text(local_env_yml, env_yml)
             dockerfile += "\n" + f"""
 # --- SWEbench environment (environment.yml) ---
 USER root
-RUN cat > /root/environment.yml <<'EOF_ENV'
-{env_yml}
-EOF_ENV
+COPY {local_env_yml.as_posix()} /root/environment.yml
 RUN bash -lc "source {cfg.conda_prefix}/bin/activate && conda env create -f /root/environment.yml"
 """
             if python_ver:
-                dockerfile += f"RUN bash -lc \"source {cfg.conda_prefix}/bin/activate && conda activate {cfg.env_name} && conda install -y python={python_ver}\"\n"
+                dockerfile += (
+                    f"RUN bash -lc \"source {cfg.conda_prefix}/bin/activate && conda activate {cfg.env_name} && conda install -y python={python_ver}\"\n"
+                )
             dockerfile += "USER user\n"
         elif packages == "requirements.txt":
             reqs_text = get_requirements(ex)
+            local_reqs = pathlib.Path(cfg.artifacts_dir) / f"{_safe_repo_alias(repo)}_{env_hash}_requirements.txt"
+            _write_text(local_reqs, reqs_text)
             dockerfile += "\n" + f"""
 # --- SWEbench environment (requirements.txt) ---
 USER root
 RUN bash -lc "source {cfg.conda_prefix}/bin/activate && conda create -n {cfg.env_name} python={python_ver} -y"
-RUN cat > /root/requirements.txt <<'EOF_REQ'
-{reqs_text}
-EOF_REQ
+COPY {local_reqs.as_posix()} /root/requirements.txt
 RUN bash -lc "source {cfg.conda_prefix}/bin/activate && conda activate {cfg.env_name} && python -m pip install -r /root/requirements.txt"
 USER user
 """
