@@ -18,6 +18,11 @@ tools:
     auto_template: ${oc.env:SWEBENCH_TEMPLATES_ENABLE,0}
     # Prefix used when deriving aliases (matches our template builders)
     alias_prefix: ${oc.env:SWEBENCH_ALIAS_PREFIX,swebench-mini}
+    # Truncate large tool outputs before feeding back into the model
+    # (full logs are still persisted to disk)
+    max_output_tokens: ${oc.env:SWEBENCH_TOOL_MAX_OUTPUT_TOKENS,10000}
+    chars_per_token: ${oc.env:SWEBENCH_TOOL_CHARS_PER_TOKEN,4}
+    truncate_side: ${oc.env:SWEBENCH_TOOL_TRUNCATE_SIDE,middle}
     prewarm: ${oc.env:SWEBENCH_PREWARMED,0}
     prewarm_env_name: ${oc.env:SWEBENCH_PREWARM_ENV_NAME,testbed}
     worktree_mode: true

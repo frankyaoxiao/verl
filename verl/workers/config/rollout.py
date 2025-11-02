@@ -53,6 +53,12 @@ class MultiTurnConfig(BaseConfig):
     tool_response_truncate_side: str = "middle"
     interaction_config_path: Optional[str] = None
     use_inference_chat_template: bool = False
+    # Auto-select chat template behavior based on model name patterns
+    auto_chat_template: bool = False
+    # If any of these lowercase substrings match the model identifier, enable inference chat template
+    chat_template_inference_when_model_matches: list[str] = field(
+        default_factory=lambda: ["llama-3", "llama3", "llama 3"]
+    )
     tokenization_sanity_check_mode: str = "strict"
     format: str = "hermes"
     num_repeat_rollouts: Optional[int] = None

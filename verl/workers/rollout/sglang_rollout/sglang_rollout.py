@@ -293,6 +293,25 @@ class SGLangRollout(BaseRollout):
 
         self._init_distributed_env(device_mesh_cpu=None, **kwargs)
 
+        # Optionally auto-select chat template behavior based on model id
+        try:
+            if self.config.multi_turn.get("auto_chat_template", False):
+                model_id = (getattr(model_config, "path", None) or actor_module or "").lower()
+                patterns = self.config.multi_turn.get(
+                    "chat_template_inference_when_model_matches", []
+                )
+                if isinstance(patterns, list) and any(p in model_id for p in patterns):
+                    # Enable the inference chat template for better alignment with HF chat models (e.g., Llama 3)
+                    self.config.multi_turn.use_inference_chat_template = True
+                    logger.info(
+                        "[chat-template] Enabling inference chat template for model '%s' (patterns=%s)",
+                        model_id,
+                        patterns,
+                    )
+        except Exception:
+            # Best effort: do not block initialization on auto template logic
+            logger.debug("Auto chat template selection skipped due to exception", exc_info=True)
+
         self._verify_config(model_hf_config=model_hf_config)
         # initialize the inference engine
         self._init_inference_engine(trust_remote_code, actor_module, port)
@@ -818,6 +837,40 @@ class SGLangRollout(BaseRollout):
         logger.info(f"[TIMING] {req.request_id[:8]} - Starting rollout")
         
         _req = deepcopy(req)
+
+        # Helper: dump current conversation snapshot after each turn or tool update
+        def _dump_conversation_snapshot():
+            dump_dir = os.getenv("VERL_CONVERSATION_DUMP_DIR")
+            if not dump_dir:
+                return
+            try:
+                dump_path = Path(dump_dir)
+                dump_path.mkdir(parents=True, exist_ok=True)
+                convo_path = dump_path / f"{_req.request_id}.txt"
+                with convo_path.open("w", encoding="utf-8") as fh:
+                    fh.write(f"request_id: {_req.request_id}\n")
+                    fh.write(f"num_turns: {len(_req.messages)}\n\n")
+                    for turn_index, message in enumerate(_req.messages):
+                        msg_dict = (
+                            message.model_dump(mode="python", exclude_none=False)
+                            if hasattr(message, "model_dump")
+                            else dict(message)
+                        )
+                        role = msg_dict.get("role")
+                        fh.write(f"--- turn {turn_index} | role={role} ---\n")
+                        tool_calls = msg_dict.get("tool_calls")
+                        if tool_calls:
+                            fh.write("tool_calls:\n")
+                            fh.write(json.dumps(tool_calls, ensure_ascii=False, indent=2))
+                            fh.write("\n")
+                        content = msg_dict.get("content")
+                        if isinstance(content, str):
+                            fh.write(content)
+                        else:
+                            fh.write(json.dumps(content, ensure_ascii=False, indent=2))
+                        fh.write("\n\n")
+            except Exception:  # pragma: no cover - best effort
+                logger.exception("Failed to dump conversation snapshot to %s", dump_dir)
         finish_reason_type = None
         output = None
 
@@ -888,6 +941,7 @@ class SGLangRollout(BaseRollout):
                     logger.info(f"[TIMING] {_req.request_id[:8]} - Completed {num_tools} tool call(s) in {t_tool_elapsed:.2f}s")
                     
                     _req.add_tool_response_messages(self.processing_class, [resp for resp, _, _ in tool_call_results])
+                    _dump_conversation_snapshot()
                     for tool_call, (resp, reward, metrics) in zip(parsed_tool_calls, tool_call_results, strict=True):
                         _req.update_metrics(metrics, tool_call.function.name)
                     if len(_req.input_ids) >= self.config.max_model_len:
@@ -946,6 +1000,7 @@ class SGLangRollout(BaseRollout):
                 current_turns += 1
                 if finish_reason_type == FinishReasonTypeEnum.LENGTH:
                     _req.add_assistant_message(self.processing_class, content=content, content_ids=content_ids)
+                    _dump_conversation_snapshot()
                     break
                 else:
                     if self._function_call_parser and self._function_call_parser.has_tool_call(content):
@@ -983,8 +1038,10 @@ class SGLangRollout(BaseRollout):
                                 content=normed_content,
                                 tool_calls=parsed_tool_calls,
                             )
+                            _dump_conversation_snapshot()
                         else:
                             _req.add_assistant_message(self.processing_class, content=content, content_ids=content_ids)
+                            _dump_conversation_snapshot()
                             finish_reason_type = FinishReasonTypeEnum.STOP
                             _req.state = AsyncRolloutRequestStateEnum.COMPLETED
                             break
@@ -994,6 +1051,7 @@ class SGLangRollout(BaseRollout):
                             content=content,
                             content_ids=content_ids,
                         )
+                        _dump_conversation_snapshot()
                         if (
                             _req.interaction_kwargs
                             and self.interaction_map
@@ -1037,6 +1095,7 @@ class SGLangRollout(BaseRollout):
                     break
                 else:
                     _req.add_user_message(self.processing_class, content)
+                    _dump_conversation_snapshot()
                     if len(_req.input_ids) >= self.config.max_model_len:
                         finish_reason_type = FinishReasonTypeEnum.STOP
                         break

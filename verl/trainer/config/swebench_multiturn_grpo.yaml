@@ -47,6 +47,9 @@ actor_rollout_ref:
       max_assistant_turns: 6
       max_user_turns: 6
       tool_config_path: ${oc.env:SWEBENCH_TOOL_CONFIG,examples/sglang_multiturn/config/tool_config/swebench_tool_config.yaml}
+      # Use the tokenizer's inference chat template automatically for supported models (e.g., Llama 3)
+      auto_chat_template: ${oc.env:SWEBENCH_AUTO_CHAT_TEMPLATE,1}
+      chat_template_inference_when_model_matches: ["llama-3", "llama3", "llama 3"]
   ref:
     log_prob_micro_batch_size_per_gpu: 1
 

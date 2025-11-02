@@ -152,6 +152,10 @@ class SWEbenchSandboxTool(BaseTool):
         if self.log_dir is not None:
             self.log_dir.mkdir(parents=True, exist_ok=True)
         self.model_name = config.get("model_name", "verl_agent")
+        # Output truncation for tool responses (extensible caps)
+        self.max_output_tokens: int = int(config.get("max_output_tokens", 10_000))
+        self.chars_per_token: int = int(config.get("chars_per_token", 4))
+        self.truncate_side: str = str(config.get("truncate_side", "middle"))
 
         # Worktree mode settings for per-question persistent sandboxes.
         self.worktree_mode: bool = config.get("worktree_mode", False)
@@ -267,6 +271,14 @@ class SWEbenchSandboxTool(BaseTool):
         # If we already have a chosen template (request or config), pass it to sandbox creation
         if chosen_template:
             sandbox_kwargs["template"] = chosen_template
+            # If a non-default template alias is explicitly provided (via request or config),
+            # align to the prewarmed template layout under /workspace.
+            # We consider 'swebench-conda' the legacy default that uses /home/user.
+            if (create_kwargs_template or req_template) and isinstance(chosen_template, str):
+                if chosen_template.strip() and chosen_template.strip() != "swebench-conda":
+                    self.workspace = "/workspace"
+                    self.repo_path = posixpath.join(self.workspace, "testbed")
+                    self.worktree_root = posixpath.join(self.workspace, "worktrees")
 
         # Auto-select a per-repo template if enabled and no explicit override provided
         used_auto_template = False
@@ -763,6 +775,23 @@ class SWEbenchSandboxTool(BaseTool):
             parts.append(stderr)
         return "\n".join(parts)
 
+    def _truncate_text_for_model(self, text: str) -> str:
+        try:
+            max_chars = self.max_output_tokens * max(1, self.chars_per_token)
+        except Exception:
+            max_chars = 40_000
+        if len(text) <= max_chars:
+            return text
+        side = (self.truncate_side or "middle").lower()
+        notice = f"\n\n[Output truncated to ~{self.max_output_tokens} tokens]"
+        if side == "head":
+            return text[:max_chars] + notice
+        if side == "tail":
+            return text[-max_chars:] + notice
+        # middle by default
+        keep = max_chars // 2
+        return text[:keep] + "\n...\n" + text[-keep:] + notice
+
     def _collect_output(self, result: CommandResult) -> str:
         stdout = result.stdout or ""
         stderr = result.stderr or ""
@@ -1010,10 +1039,12 @@ class SWEbenchSandboxTool(BaseTool):
             allow_error=True,
         )
         stage_text = self._format_stage("Shell command", result)
+        # Truncate for model consumption while keeping full logs persisted
+        stage_text_trunc = self._truncate_text_for_model(stage_text)
         self._persist_logs(instance_id, "shell", stage_text)
         status = "completed" if result.exit_code == 0 else "failed"
         metrics = {"status": status, "exit_code": result.exit_code}
-        return ToolResponse(text=stage_text), 0.0, metrics
+        return ToolResponse(text=stage_text_trunc), 0.0, metrics
 
     def _execute_read_file(
         self, instance_id: str, record: dict[str, Any], parameters: dict[str, Any]
@@ -1055,8 +1086,9 @@ class SWEbenchSandboxTool(BaseTool):
             text = text[:max_len]
 
         response_text = f"Path: {path}\n\n{text}{truncated}"
+        response_text_trunc = self._truncate_text_for_model(response_text)
         self._persist_logs(instance_id, "read_file", response_text)
-        return ToolResponse(text=response_text), 0.0, {"status": "completed"}
+        return ToolResponse(text=response_text_trunc), 0.0, {"status": "completed"}
 
     def _execute_write_file(
         self, instance_id: str, record: dict[str, Any], parameters: dict[str, Any]
@@ -1156,11 +1188,8 @@ class SWEbenchSandboxTool(BaseTool):
             log_text = "\n\n".join(stage_logs)
             self._persist_logs(instance_id, "patch_invalid", log_text)
             record["last_reward"] = 0.0
-            return (
-                ToolResponse(text=f"{log_text}\n\nPatch did not apply cleanly."),
-                0.0,
-                {"status": "patch_invalid"},
-            )
+            resp_text = f"{log_text}\n\nPatch did not apply cleanly."
+            return (ToolResponse(text=self._truncate_text_for_model(resp_text)), 0.0, {"status": "patch_invalid"})
 
         patch_apply = self._run_command(
             sandbox,
@@ -1219,8 +1248,9 @@ class SWEbenchSandboxTool(BaseTool):
         self._persist_logs(instance_id, status, log_text)
 
         response_text = f"{log_text}\n\nEvaluation log:\n{eval_log}"
+        response_text_trunc = self._truncate_text_for_model(response_text)
         metrics = {"status": status, "exit_code": eval_result.exit_code}
-        return ToolResponse(text=response_text), reward, metrics
+        return ToolResponse(text=response_text_trunc), reward, metrics
 
 
 __all__ = ["SWEbenchSandboxTool"]
