@@ -63,6 +63,14 @@ class MultiTurnConfig(BaseConfig):
     format: str = "hermes"
     num_repeat_rollouts: Optional[int] = None
 
+    # Fallback coaching when assistant doesn't emit a tool call
+    enable_no_tool_call_coach: bool = True
+    no_tool_call_prompt: str = (
+        "No tool call was found in your last message. Please continue working on the problem and use the "
+        "run_swebench_tests tool: use action=\"run_shell\" to run commands, action=\"read_file\"/\"write_file\" to read/write files, "
+        "and action=\"submit_patch\" with your unified diff when you are ready to be graded."
+    )
+
 
 @dataclass
 class CustomAsyncServerConfig(BaseConfig):

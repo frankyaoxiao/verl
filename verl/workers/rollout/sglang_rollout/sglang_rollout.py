@@ -1040,11 +1040,30 @@ class SGLangRollout(BaseRollout):
                             )
                             _dump_conversation_snapshot()
                         else:
+                            # No valid tool calls parsed — coach the model to proceed with tools instead of stopping
                             _req.add_assistant_message(self.processing_class, content=content, content_ids=content_ids)
                             _dump_conversation_snapshot()
-                            finish_reason_type = FinishReasonTypeEnum.STOP
-                            _req.state = AsyncRolloutRequestStateEnum.COMPLETED
-                            break
+                            if (
+                                self.config.multi_turn.get("enable_no_tool_call_coach", True)
+                                and user_turns < self.config.multi_turn.max_user_turns
+                            ):
+                                coach_msg = self.config.multi_turn.get("no_tool_call_prompt") or (
+                                    "No tool call was found in your last message. Please continue working on the problem and use the "
+                                    "run_swebench_tests tool (run_shell/read_file/write_file/submit_patch)."
+                                )
+                                _req.add_user_message(self.processing_class, coach_msg)
+                                user_turns += 1
+                                # If we already exceed max model len, stop; otherwise continue
+                                prompt_length = len(_req.get_generation_prompt_ids(self.processing_class))
+                                if prompt_length + 1 >= self.config.max_model_len:
+                                    finish_reason_type = FinishReasonTypeEnum.LENGTH
+                                    break
+                                _req.state = AsyncRolloutRequestStateEnum.RUNNING
+                                continue
+                            else:
+                                finish_reason_type = FinishReasonTypeEnum.STOP
+                                _req.state = AsyncRolloutRequestStateEnum.COMPLETED
+                                break
                     else:
                         _req.add_assistant_message(
                             self.processing_class,
@@ -1060,10 +1079,27 @@ class SGLangRollout(BaseRollout):
                         ):
                             _req.state = AsyncRolloutRequestStateEnum.INTERACTING
                         else:
-                            # Add ending condition
-                            finish_reason_type = FinishReasonTypeEnum.STOP
-                            _req.state = AsyncRolloutRequestStateEnum.COMPLETED
-                            break
+                            # No tool call and no interaction — coach to continue rather than stopping
+                            if (
+                                self.config.multi_turn.get("enable_no_tool_call_coach", True)
+                                and user_turns < self.config.multi_turn.max_user_turns
+                            ):
+                                coach_msg = self.config.multi_turn.get("no_tool_call_prompt") or (
+                                    "No tool call was found in your last message. Please continue working on the problem and use the "
+                                    "run_swebench_tests tool (run_shell/read_file/write_file/submit_patch)."
+                                )
+                                _req.add_user_message(self.processing_class, coach_msg)
+                                user_turns += 1
+                                prompt_length = len(_req.get_generation_prompt_ids(self.processing_class))
+                                if prompt_length + 1 >= self.config.max_model_len:
+                                    finish_reason_type = FinishReasonTypeEnum.LENGTH
+                                    break
+                                _req.state = AsyncRolloutRequestStateEnum.RUNNING
+                            else:
+                                # Add ending condition
+                                finish_reason_type = FinishReasonTypeEnum.STOP
+                                _req.state = AsyncRolloutRequestStateEnum.COMPLETED
+                                break
             elif _req.state == AsyncRolloutRequestStateEnum.INTERACTING:
                 user_turns += 1
                 messages = [{"role": x.role, "content": x.content} for x in _req.messages]
