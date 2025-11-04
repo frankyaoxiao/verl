@@ -44,8 +44,8 @@ actor_rollout_ref:
     max_num_batched_tokens: 32768  # Increased from default 8192 for better batching
     multi_turn:
       enable: True
-      max_assistant_turns: 6
-      max_user_turns: 6
+      max_assistant_turns: 15 
+      max_user_turns: 15 
       tool_config_path: ${oc.env:SWEBENCH_TOOL_CONFIG,examples/sglang_multiturn/config/tool_config/swebench_tool_config.yaml}
       # Use the tokenizer's inference chat template automatically for supported models (e.g., Llama 3)
       auto_chat_template: ${oc.env:SWEBENCH_AUTO_CHAT_TEMPLATE,1}

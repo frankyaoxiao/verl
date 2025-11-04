@@ -1,0 +1,78 @@
+hydra:
+  searchpath:
+    - file://examples/sglang_multiturn/config
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# Source of truth for the SWEbench smoke run
+data:
+  # RL_DIR is set by the inner launcher; avoid '~' parsing issues in resolvers
+  train_files: ${oc.env:RL_DIR}/train.parquet
+  val_files: ${oc.env:RL_DIR}/val.parquet
+  return_raw_chat: True
+  # Small batches for tiny splits
+  train_batch_size: 1
+  train_max_samples: 8
+  val_max_samples: 8
+  # Generous caps to avoid truncation errors in tiny smoke
+  max_prompt_length: 25000
+  max_response_length: 2048
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: False
+
+actor_rollout_ref:
+  hybrid_engine: True
+  model:
+    path: ${oc.env:SWEBENCH_MODEL,meta-llama/Llama-3.1-8B-Instruct}
+    use_remove_padding: True
+  actor:
+    strategy: fsdp
+    fsdp_config:
+      model_dtype: bf16
+    optim:
+      lr: 5e-7
+    ppo_mini_batch_size: 4
+    ppo_micro_batch_size_per_gpu: 1
+    ppo_max_token_len_per_gpu: 65536
+    use_dynamic_bsz: True
+  rollout:
+    name: sglang
+    n: 8
+    tensor_model_parallel_size: 1
+    gpu_memory_utilization: 0.7
+    max_num_batched_tokens: 32768
+    prompt_length: ${data.max_prompt_length}
+    response_length: ${data.max_response_length}
+    multi_turn:
+      enable: True
+      max_assistant_turns: 6
+      max_user_turns: 6
+      tool_config_path: examples/sglang_multiturn/config/tool_config/swebench_tool_config.yaml
+      # Enable model-appropriate chat template automatically (e.g., Llama 3)
+      auto_chat_template: true
+      chat_template_inference_when_model_matches: ["llama-3", "llama3", "llama 3"]
+  ref:
+    log_prob_micro_batch_size_per_gpu: 1
+
+critic:
+  enable: False
+
+reward_model:
+  enable: False
+
+trainer:
+  # GPUs per node controls both actor/trainer; set via env to scale up
+  n_gpus_per_node: 1
+  nnodes: 1
+  total_training_steps: 1
+  save_freq: -1
+  logger: console
+  val_before_train: False
+
+transfer_queue:
+  enable: False
