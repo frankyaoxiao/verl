@@ -11,9 +11,8 @@ defaults:
   - _self_
 
 data:
-  # Resolve from RL_DIR (set by the dataset creation step) or fall back to DATA_ROOT
-  train_files: ${oc.env:RL_DIR,${oc.env:DATA_ROOT,~/data/swebench_mini}/rl}/train.parquet
-  val_files: ${oc.env:RL_DIR,${oc.env:DATA_ROOT,~/data/swebench_mini}/rl}/val.parquet
+  train_files: ${oc.env:RL_DIR}/train.parquet
+  val_files: ${oc.env:RL_DIR}/val.parquet
   return_raw_chat: True
   train_batch_size: 1
   train_max_samples: 8
