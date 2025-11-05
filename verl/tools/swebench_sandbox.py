@@ -65,6 +65,8 @@ def load_e2b_api_key() -> str:
 class SWEbenchSandboxTool(BaseTool):
     """Tool that evaluates candidate patches using an E2B sandbox."""
 
+    _STATE_REGISTRY: dict[str, dict[str, Any]] = {}
+
     DEFAULT_SCHEMA = OpenAIFunctionToolSchema.model_validate(
         {
             "type": "function",
@@ -118,7 +120,6 @@ class SWEbenchSandboxTool(BaseTool):
 
     def __init__(self, config: dict, tool_schema: Optional[OpenAIFunctionToolSchema]):
         super().__init__(config, tool_schema or self.DEFAULT_SCHEMA)
-        self._instances: dict[str, dict[str, Any]] = {}
         self.timeout_seconds = config.get("timeout_seconds", 900)
         self.install_timeout_seconds = config.get("install_timeout_seconds", 300)
         self.enable_e2b = config.get("enable_e2b", True)
@@ -156,14 +157,29 @@ class SWEbenchSandboxTool(BaseTool):
         self.max_output_tokens: int = int(config.get("max_output_tokens", 10_000))
         self.chars_per_token: int = int(config.get("chars_per_token", 4))
         self.truncate_side: str = str(config.get("truncate_side", "middle"))
+        self.mode: str = str(config.get("mode", "legacy")).lower()
+
+        state_key = self._config_state_key(config)
+        state = self._STATE_REGISTRY.setdefault(
+            state_key,
+            {
+                "instances": {},
+                "canonicals_lock": threading.Lock(),
+                "canonicals": {},
+                "req_to_canon": {},
+                "req_worktrees": {},
+            },
+        )
+        self._state_key = state_key
+        self._instances = state["instances"]
+        self._canonicals_lock = state["canonicals_lock"]
+        self._canonicals = state["canonicals"]
+        self._req_to_canon = state["req_to_canon"]
+        self._req_worktrees = state["req_worktrees"]
 
         # Worktree mode settings for per-question persistent sandboxes.
         self.worktree_mode: bool = config.get("worktree_mode", False)
         self.worktree_root: str = config.get("worktree_root", posixpath.join(self.workspace, "worktrees"))
-        self._canonicals_lock = threading.Lock()
-        self._canonicals: dict[str, dict[str, Any]] = {}
-        self._req_to_canon: dict[str, str] = {}
-        self._req_worktrees: dict[str, str] = {}
 
     @staticmethod
     def _short_env_hash(env_image_key: str) -> str:
@@ -177,6 +193,23 @@ class SWEbenchSandboxTool(BaseTool):
     @staticmethod
     def _safe_repo_alias(repo: str) -> str:
         return repo.replace("/", "_")
+
+    @staticmethod
+    def _config_state_key(config: dict) -> str:
+        filtered = {k: v for k, v in config.items() if k != "mode"}
+
+        def _normalize(val: Any) -> Any:
+            if isinstance(val, Path):
+                return str(val)
+            return val
+
+        normalized = {k: _normalize(v) for k, v in filtered.items()}
+        try:
+            return json.dumps(normalized, sort_keys=True, default=str)
+        except TypeError:
+            # Fallback: coerce any non-serialisable values to string
+            coerced = {k: (_normalize(v) if isinstance(v, (str, int, float, bool, type(None))) else str(v)) for k, v in normalized.items()}
+            return json.dumps(coerced, sort_keys=True, default=str)
 
     def _env_exists(self, sandbox: E2BSandbox) -> bool:
         """Check whether the pre-warmed conda env exists in the sandbox.
@@ -230,6 +263,10 @@ class SWEbenchSandboxTool(BaseTool):
         dataset_instance = create_kwargs.get("dataset_instance")
         if dataset_instance is None:
             raise ValueError("dataset_instance is required in tools_kwargs for SWEbench execution")
+
+        # If another tool instance already initialised this sandbox, reuse it.
+        if instance_id in self._instances:
+            return instance_id, ToolResponse()
 
         # This executor installs dependencies per sandbox run; disable for now if too slow.
         test_spec: TestSpec = make_test_spec(dataset_instance)
@@ -640,34 +677,51 @@ class SWEbenchSandboxTool(BaseTool):
             raise ValueError(f"Unknown SWEbench sandbox instance: {instance_id}")
 
         record = self._instances[instance_id]
-        action = parameters.get("action")
-        if not action:
-            action = "submit_patch"
-
-        action = action.lower()
+        parameters = parameters or {}
+        mode = self.mode
 
         # Run blocking E2B API calls in thread pool to avoid blocking event loop
         # This allows multiple tool calls to execute in parallel via asyncio.gather()
         start_time = time.time()
-        LOGGER.info(f"[TIMING] {instance_id[:8]} - Starting tool execution: {action}")
-        
-        if action == "run_shell":
+        if mode == "bash":
+            LOGGER.info(f"[TIMING] {instance_id[:8]} - Starting tool execution: bash")
             result = await asyncio.to_thread(self._execute_run_shell, instance_id, record, parameters)
-        elif action == "read_file":
-            result = await asyncio.to_thread(self._execute_read_file, instance_id, record, parameters)
-        elif action == "write_file":
-            result = await asyncio.to_thread(self._execute_write_file, instance_id, record, parameters)
-        elif action == "submit_patch":
-            patch = parameters.get("patch")
-            notes = parameters.get("notes", "")
-            if not isinstance(patch, str) or not patch.strip():
-                return ToolResponse(text="No patch provided."), 0.0, {"status": "invalid_patch"}
-            result = await asyncio.to_thread(self._execute_submit_patch, instance_id, record, patch, notes)
+        elif mode == "submit_solution":
+            LOGGER.info(f"[TIMING] {instance_id[:8]} - Starting tool execution: submit_solution")
+            # Ignore any stray parameters but surface a warning for transparency.
+            extra_params = {k: v for k, v in parameters.items() if v not in (None, "", [], {})}
+            if extra_params:
+                LOGGER.debug(
+                    "[submit_solution] Ignoring unexpected parameters for %s: %s",
+                    instance_id,
+                    list(extra_params.keys()),
+                )
+            result = await asyncio.to_thread(self._execute_submit_solution, instance_id, record)
         else:
-            return ToolResponse(text=f"Unknown action '{action}'. Nothing executed."), 0.0, {"status": "unknown_action"}
-        
+            action = parameters.get("action")
+            if not action:
+                action = "submit_patch"
+            action = action.lower()
+            LOGGER.info(f"[TIMING] {instance_id[:8]} - Starting tool execution: {action}")
+
+            if action == "run_shell":
+                result = await asyncio.to_thread(self._execute_run_shell, instance_id, record, parameters)
+            elif action == "read_file":
+                result = await asyncio.to_thread(self._execute_read_file, instance_id, record, parameters)
+            elif action == "write_file":
+                result = await asyncio.to_thread(self._execute_write_file, instance_id, record, parameters)
+            elif action == "submit_patch":
+                patch = parameters.get("patch")
+                notes = parameters.get("notes", "")
+                if not isinstance(patch, str) or not patch.strip():
+                    return ToolResponse(text="No patch provided."), 0.0, {"status": "invalid_patch"}
+                result = await asyncio.to_thread(self._execute_submit_patch, instance_id, record, patch, notes)
+            else:
+                return ToolResponse(text=f"Unknown action '{action}'. Nothing executed."), 0.0, {"status": "unknown_action"}
+
         elapsed = time.time() - start_time
-        LOGGER.info(f"[TIMING] {instance_id[:8]} - Completed {action} in {elapsed:.2f}s")
+        label = "submit_solution" if mode == "submit_solution" else ("bash" if mode == "bash" else action)
+        LOGGER.info(f"[TIMING] {instance_id[:8]} - Completed {label} in {elapsed:.2f}s")
         return result
 
     async def calc_reward(self, instance_id: str, **kwargs) -> float:  # noqa: D401
@@ -1251,6 +1305,87 @@ class SWEbenchSandboxTool(BaseTool):
         response_text_trunc = self._truncate_text_for_model(response_text)
         metrics = {"status": status, "exit_code": eval_result.exit_code}
         return ToolResponse(text=response_text_trunc), reward, metrics
+
+    def _execute_submit_solution(
+        self,
+        instance_id: str,
+        record: dict[str, Any],
+    ) -> tuple[ToolResponse, float, dict]:
+        if not self.enable_e2b:
+            return ToolResponse(text="E2B execution is disabled."), 0.0, {"status": "disabled"}
+
+        sandbox: Optional[E2BSandbox] = record.get("sandbox")
+        if sandbox is None:
+            return ToolResponse(text="Sandbox is not initialised."), 0.0, {"status": "no_sandbox"}
+
+        test_spec: TestSpec = record["test_spec"]
+        dataset_instance = record["dataset_instance"]
+        worktree_path = record.get("worktree_path") or self.repo_path
+
+        stage_logs: list[str] = []
+
+        git_status_cmd = (
+            f"bash -lc {json.dumps(f'cd {worktree_path} && git status --short --branch')}"
+            if worktree_path
+            else "bash -lc 'git status --short --branch'"
+        )
+        git_status = self._run_command(
+            sandbox,
+            git_status_cmd,
+            timeout=120,
+            desc="git status",
+            cwd=worktree_path,
+            allow_error=True,
+        )
+        stage_logs.append(self._format_stage("Git status", git_status))
+
+        eval_script = test_spec.eval_script
+        if worktree_path and worktree_path != self.repo_path:
+            try:
+                eval_script = eval_script.replace(self.repo_path, worktree_path)
+            except Exception:  # pragma: no cover - best effort path rewrite
+                LOGGER.debug(
+                    "[submit_solution] Failed to rewrite repo_path '%s' to worktree '%s'",
+                    self.repo_path,
+                    worktree_path,
+                )
+
+        eval_result = self._run_script(
+            sandbox,
+            script_content=eval_script,
+            remote_name="run_eval.sh",
+            timeout=self.eval_timeout_seconds,
+            stage_name="Evaluation",
+            allow_error=True,
+        )
+        stage_logs.append(self._format_stage("Evaluation", eval_result))
+
+        resolved = eval_result.exit_code == 0
+        reward = 1.0 if resolved else 0.0
+        status = "passed" if resolved else "failed"
+        record["last_reward"] = reward
+
+        stage_logs.append("## Evaluation summary")
+        stage_logs.append(
+            textwrap.dedent(
+                f"""
+                exit_code: {eval_result.exit_code}
+                reward: {reward}
+                """
+            ).strip()
+        )
+
+        log_text = "\n\n".join(stage_logs)
+        self._persist_logs(instance_id, status, log_text)
+        record["logs"]["submission"] = log_text
+
+        metrics = {
+            "status": status,
+            "exit_code": eval_result.exit_code,
+            "instance_id": dataset_instance.get("instance_id"),
+        }
+        response_text = self._truncate_text_for_model(log_text)
+        return ToolResponse(text=response_text), reward, metrics
 
 
 __all__ = ["SWEbenchSandboxTool"]

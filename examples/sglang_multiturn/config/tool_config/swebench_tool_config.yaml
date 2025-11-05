@@ -1,7 +1,8 @@
 tools:
 - class_name: verl.tools.swebench_sandbox.SWEbenchSandboxTool
-  config:
+  config: &swebench_sandbox_config
     type: native
+    mode: bash
     docker_image: swebench/base:latest
     workdir: ${oc.env:SWEBENCH_WORKDIR,/home/user}
     repo_cache: ~/swebench_repo_cache
@@ -14,12 +15,8 @@ tools:
     log_dir: tmp/verl_swebench_logs
     enable_e2b: true
     template: ${oc.env:SWEBENCH_TEMPLATE_ALIAS,swebench-conda}
-    # Enable automatic per-repo template selection based on SWE-bench instance
     auto_template: ${oc.env:SWEBENCH_TEMPLATES_ENABLE,0}
-    # Prefix used when deriving aliases (matches our template builders)
     alias_prefix: ${oc.env:SWEBENCH_ALIAS_PREFIX,swebench-mini}
-    # Truncate large tool outputs before feeding back into the model
-    # (full logs are still persisted to disk)
     max_output_tokens: ${oc.env:SWEBENCH_TOOL_MAX_OUTPUT_TOKENS,10000}
     chars_per_token: ${oc.env:SWEBENCH_TOOL_CHARS_PER_TOKEN,4}
     truncate_side: ${oc.env:SWEBENCH_TOOL_TRUNCATE_SIDE,middle}
@@ -30,35 +27,28 @@ tools:
   tool_schema:
     type: function
     function:
-      name: run_swebench_tests
-      description: "Interact with the SWEbench sandbox. This sandbox persists across\
-        \ tool calls, so you can:\n  - run shell commands (`action=\"run_shell\"`)\
-        \ - note: each command starts fresh in /workspace/testbed, use 'cd dir &&\
-        \ command' to work in subdirectories\n  - read or write files (`action=\"\
-        read_file\"` / `action=\"write_file\"`)\n  - submit your final patch for\
-        \ judging (`action=\"submit_patch\"`)\nOnly call `action=\"submit_patch\"\
-        ` when you are ready to be graded; it runs the SWEbench judge and ends the\
-        \ session."
+      name: bash
+      description: "Run a bash command inside the SWEbench sandbox. The sandbox\
+        \ persists across tool calls, so file edits remain for future actions."
       parameters:
         type: object
         properties:
-          action:
-            type: string
-            description: run_shell | read_file | write_file | submit_patch
           command:
             type: string
-            description: Shell command to execute when action==run_shell. Each command starts fresh in /workspace/testbed. Use 'cd directory && your_command' to run commands in other directories.
-          path:
-            type: string
-            description: File path for read/write operations.
-          content:
-            type: string
-            description: File content when action==write_file.
-          patch:
-            type: string
-            description: Unified diff provided when action==submit_patch.
-          notes:
-            type: string
-            description: Optional rationale for submissions.
+            description: "A single bash command to execute, e.g. 'ls', 'cd repo &&\
+              \ git status', 'python -m pytest tests/'."
         required:
-        - action
+        - command
+- class_name: verl.tools.swebench_sandbox.SWEbenchSandboxTool
+  config:
+    <<: *swebench_sandbox_config
+    mode: submit_solution
+  tool_schema:
+    type: function
+    function:
+      name: submit_solution
+      description: "Run the SWE-bench evaluation harness on the current sandbox state.\
+        \ Use this once you are satisfied with your changes."
+      parameters:
+        type: object
+        properties: {}
