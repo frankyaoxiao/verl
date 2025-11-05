@@ -8,7 +8,6 @@ export DATA_ROOT
 
 export RUN_TRAIN=${RUN_TRAIN:-1}
 
-echo "SWEbench smoke: model=${SWEBENCH_MODEL:-meta-llama/Llama-3.1-8B-Instruct} gpus=${SWEBENCH_NUM_GPUS:-1}" >&2
 
 ./tests/special_e2e/ppo_trainer/run_swebench_smoke.sh "$@"
 

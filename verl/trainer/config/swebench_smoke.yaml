@@ -27,8 +27,9 @@ algorithm:
 actor_rollout_ref:
   hybrid_engine: True
   model:
-    path: ${oc.env:SWEBENCH_MODEL,meta-llama/Llama-3.1-8B-Instruct}
+    path: ${oc.env:SWEBENCH_MODEL,meta-llama/Llama-3.1-70B-Instruct}
     use_remove_padding: True
+    enable_activation_offload: False
   actor:
     strategy: fsdp
     fsdp_config:
@@ -42,15 +43,15 @@ actor_rollout_ref:
   rollout:
     name: sglang
     n: 8
-    tensor_model_parallel_size: 1
+    tensor_model_parallel_size: 8
     gpu_memory_utilization: 0.7
     max_num_batched_tokens: 32768
     prompt_length: ${data.max_prompt_length}
     response_length: ${data.max_response_length}
     multi_turn:
       enable: True
-      max_assistant_turns: 6
-      max_user_turns: 6
+      max_assistant_turns: 20 
+      max_user_turns: 20 
       tool_config_path: examples/sglang_multiturn/config/tool_config/swebench_tool_config.yaml
       # Enable model-appropriate chat template automatically (e.g., Llama 3)
       auto_chat_template: true
@@ -66,7 +67,7 @@ reward_model:
 
 trainer:
   # GPUs per node controls both actor/trainer; set via env to scale up
-  n_gpus_per_node: ${oc.env:SWEBENCH_NUM_GPUS,1}
+  n_gpus_per_node: 8
   nnodes: 1
   total_training_steps: 1
   save_freq: -1
