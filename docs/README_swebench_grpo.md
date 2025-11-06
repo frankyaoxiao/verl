@@ -79,27 +79,40 @@ Last updated: 2025-10-25
   - Consider optional “dry-run” mode that executes directly on host (without Docker) for debugging, gated behind config flag.
 
 ### Tool Schema
-- Define `SWEbenchSandboxTool` (native tool) with schema similar to:
+- Register `SWEbenchSandboxTool` twice—once as a `bash` tool and once as `submit_solution`:
   ```json
   {
     "type": "function",
     "function": {
-      "name": "run_swebench_tests",
-      "description": "...",
+      "name": "bash",
+      "description": "Run a bash command in the SWEbench sandbox.",
       "parameters": {
         "type": "object",
         "properties": {
-          "patch": {"type": "string", "description": "Unified diff to apply"},
-          "notes": {"type": "string", "description": "Optional rationale"}
+          "command": {"type": "string", "description": "Command to execute (e.g., 'ls', 'pytest tests/...')"}
         },
-        "required": ["patch"]
+        "required": ["command"]
       }
     }
   }
   ```
-- Support streaming of multiple tool calls per conversation (apply patch, run tests, revise patch).
-- Implementation invokes E2B sandboxes by default. For lightweight/offline tests you can set `enable_e2b=false` in the tool config; in that mode the tool performs structural checks (patch applies cleanly, optional compile) and awards reward `1` only when the patch exactly matches the reference diff.
-- Support streaming of multiple tool calls per conversation (apply patch, run tests, revise patch).
+  ```json
+  {
+    "type": "function",
+    "function": {
+      "name": "submit_solution",
+      "description": "Run the SWE-bench evaluation harness on the current repository state.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  }
+  ```
+- Both tool entries point to the same backend but set `mode: bash` or `mode: submit_solution`. The first executes arbitrary shell commands; the second evaluates the repo without requiring a diff payload.
+- Implementation invokes E2B sandboxes by default. For lightweight/offline tests you can set `enable_e2b=false`; in that mode the tool performs structural checks only.
+- Support streaming of multiple `bash` calls per conversation (inspect files, run unit tests) and a final `submit_solution` call to grade the fix.
 
 ### Interaction Hook (Optional)
 - Implement `SWEbenchInteraction` derived from `BaseInteraction`:

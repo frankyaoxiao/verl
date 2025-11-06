@@ -1049,7 +1049,7 @@ class SGLangRollout(BaseRollout):
                             ):
                                 coach_msg = self.config.multi_turn.get("no_tool_call_prompt") or (
                                     "No tool call was found in your last message. Please continue working on the problem and use the "
-                                    "run_swebench_tests tool (run_shell/read_file/write_file/submit_patch)."
+                                    "`bash` tool for shell commands or `submit_solution` when you are ready to evaluate."
                                 )
                                 _req.add_user_message(self.processing_class, coach_msg)
                                 user_turns += 1
@@ -1086,7 +1086,7 @@ class SGLangRollout(BaseRollout):
                             ):
                                 coach_msg = self.config.multi_turn.get("no_tool_call_prompt") or (
                                     "No tool call was found in your last message. Please continue working on the problem and use the "
-                                    "run_swebench_tests tool (run_shell/read_file/write_file/submit_patch)."
+                                    "`bash` tool for shell commands or `submit_solution` when you are ready to evaluate."
                                 )
                                 _req.add_user_message(self.processing_class, coach_msg)
                                 user_turns += 1

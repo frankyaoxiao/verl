@@ -29,18 +29,14 @@ DEFAULT_DATASET = "MariusHobbhahn/swe-bench-verified-mini"
 _REPO_ROOT = os.getenv("SWEBENCH_REPO_PATH", "/workspace/testbed")
 SYSTEM_PROMPT = (
     "You are an autonomous software engineer tasked with resolving issues in real-world repositories. "
-    "Your workspace is a persistent SWEbench sandbox that you can access via the `run_swebench_tests` tool. "
-    "Use the tool with different actions to explore and validate your work:\n"
-    "- `action=\"run_shell\"`: run shell commands (e.g., inspect files, run tests). "
-    f"Each command starts fresh in the repository root ({_REPO_ROOT}), so use `cd dir && command` if you need to work in subdirectories.\n"
-    "- `action=\"read_file\"` / `action=\"write_file\"`: read or modify files inside the sandbox.\n"
-    "- `action=\"submit_patch\"`: apply your final diff, run the official SWEbench judge, and end the sandbox session.\n\n"
-    "Important: Shell state (like current directory) doesn't persist between commands. "
-    "Use `cd directory && your_command` to run commands in specific directories. "
-    "However, file changes are persistent across all commands.\n\n"
-    "You have a maximum of 6 turns to solve the issue. Plan your approach efficiently and make sure to call "
-    "`action=\"submit_patch\"` before running out of turns.\n\n"
-    "Think carefully, plan your next action, and iteratively refine your solution using these capabilities until the tests pass."
+    "Your workspace is a persistent SWEbench sandbox with two tools available:\n"
+    "- `bash`: run shell commands (e.g., inspect files, run tests). Each command starts fresh in the repository root "
+    f"({_REPO_ROOT}), so use `cd dir && command` if you need to work in subdirectories.\n"
+    "- `submit_solution`: run the official SWEbench judge against the current repository state. Only call this when you "
+    "are confident in your fix—the judge will end the sandbox session.\n\n"
+    "Important: Shell state (like the current directory) doesn't persist between commands, but file changes do.\n\n"
+    "You have a maximum of 6 turns to solve the issue. Plan your approach efficiently and call `submit_solution` before running out of turns.\n\n"
+    "Think carefully, plan your next action, and iteratively refine your solution until the tests pass."
 )
 USER_PROMPT_TEMPLATE = """Repository: {repo}
 Base commit: {base_commit}
@@ -60,10 +56,8 @@ Pass-to-pass tests:
 
 Instructions:
 - Analyse the repository state and reason step by step.
-- Use `run_swebench_tests` with the appropriate action to explore the sandbox.
-  - Run shell commands with `action="run_shell"` to inspect or test your changes.
-  - Read or write files with `action="read_file"` / `action="write_file"`.
-  - Call `action="submit_patch"` (supplying your unified diff via the `patch` field) only when you believe the fix is ready; this runs the judge and ends the session.
+- Use the `bash` tool to run shell commands and explore the sandbox (e.g., `ls`, `cat`, `pytest`).
+- Call `submit_solution` only when you believe the fix is ready; this runs the SWEbench judge on the current repository and ends the session.
 - Provide unified diff patches when you believe the issue is resolved.
 """
 
@@ -144,9 +138,8 @@ def build_tools_kwargs(example: dict[str, Any]) -> dict[str, Any]:
         create_kwargs["template"] = template_alias
 
     return {
-        "run_swebench_tests": {
-            "create_kwargs": create_kwargs,
-        }
+        "bash": {"create_kwargs": create_kwargs},
+        "submit_solution": {"create_kwargs": create_kwargs},
     }
 
 
