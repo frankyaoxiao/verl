@@ -179,7 +179,7 @@ class SWEbenchSandboxTool(BaseTool):
         self._req_to_canon = state["req_to_canon"]
         self._req_worktrees = state["req_worktrees"]
         self._create_lock = state["create_lock"]
-        self._pending_events: dict[str, threading.Event] = state["pending_events"]
+        self._pending_events: dict[str, asyncio.Event] = state["pending_events"]
 
         # Worktree mode settings for per-question persistent sandboxes.
         self.worktree_mode: bool = config.get("worktree_mode", False)
@@ -272,13 +272,15 @@ class SWEbenchSandboxTool(BaseTool):
             with self._create_lock:
                 existing = self._instances.get(instance_id)
                 if existing is not None:
+                    # Increment reference count since another tool is using this sandbox
+                    existing["ref_count"] = existing.get("ref_count", 1) + 1
                     return instance_id, ToolResponse()
                 wait_event = self._pending_events.get(instance_id)
                 if wait_event is None:
-                    wait_event = threading.Event()
+                    wait_event = asyncio.Event()
                     self._pending_events[instance_id] = wait_event
                     break
-            wait_event.wait()
+            await wait_event.wait()
 
         try:
             # This executor installs dependencies per sandbox run; disable for now if too slow.
@@ -296,6 +298,7 @@ class SWEbenchSandboxTool(BaseTool):
                 "test_spec": test_spec,
                 "last_reward": 0.0,
                 "logs": {},
+                "ref_count": 1,  # Reference counting for shared sandboxes
             }
     
             if not self.enable_e2b:
@@ -531,29 +534,52 @@ class SWEbenchSandboxTool(BaseTool):
                         canonical["initialized"] = True
                         self._persist_logs(canonical_id, "setup", "\n\n".join(stage_logs))
     
-                    # Add a per-request worktree for this repeat
+                    # Add a per-request worktree at the target base commit
                     sbox = canonical["sandbox"]
                     worktree_path = posixpath.join(self.worktree_root, instance_id)
                     base_commit = dataset_instance["base_commit"]
-                    self._run_command(sbox, f"mkdir -p {self.worktree_root}", timeout=60, desc="mkdir worktrees root")
+                    worktree_stage_logs: list[str] = []
+                    t_wt_start = time.time()
+                    # Ensure worktree root exists
+                    wt_root_res = self._run_command(
+                        sbox, f"mkdir -p {self.worktree_root}", timeout=60, desc="mkdir worktrees root", allow_error=False
+                    )
+                    worktree_stage_logs.append(self._format_stage("Worktree: mkdir root", wt_root_res))
+                    # Create worktree (retry with prune if needed)
                     add_cmd = f"git -C {self.repo_path} worktree add -f {worktree_path} {base_commit}"
                     wt_add = self._run_command(
-                        sbox, add_cmd, timeout=self.repo_setup_timeout_seconds, desc="Add worktree", allow_error=True
+                        sbox, add_cmd, timeout=self.repo_setup_timeout_seconds, desc="Worktree: add", allow_error=True
                     )
+                    worktree_stage_logs.append(self._format_stage("Worktree: add", wt_add))
                     if wt_add.exit_code != 0:
-                        self._run_command(
-                            sbox, f"git -C {self.repo_path} worktree prune", timeout=120, desc="Prune worktrees", allow_error=True
+                        wt_prune = self._run_command(
+                            sbox,
+                            f"git -C {self.repo_path} worktree prune",
+                            timeout=120,
+                            desc="Worktree: prune",
+                            allow_error=True,
                         )
-                        self._run_command(
-                            sbox, add_cmd, timeout=self.repo_setup_timeout_seconds, desc="Add worktree (retry)", allow_error=False
+                        worktree_stage_logs.append(self._format_stage("Worktree: prune", wt_prune))
+                        wt_add_retry = self._run_command(
+                            sbox,
+                            add_cmd,
+                            timeout=self.repo_setup_timeout_seconds,
+                            desc="Worktree: add (retry)",
+                            allow_error=False,
                         )
-                    self._run_command(
+                        worktree_stage_logs.append(self._format_stage("Worktree: add (retry)", wt_add_retry))
+                    wt_safe = self._run_command(
                         sbox,
                         f"git config --global --add safe.directory {worktree_path}",
                         timeout=60,
-                        desc="Mark worktree safe",
+                        desc="Worktree: mark safe",
                         allow_error=True,
                     )
+                    worktree_stage_logs.append(self._format_stage("Worktree: mark safe", wt_safe))
+                    LOGGER.info(
+                        f"[TIMING] {canonical_id[:8]} - Worktree setup completed in {time.time() - t_wt_start:.2f}s"
+                    )
+                    self._persist_logs(instance_id, "worktree_setup", "\n\n".join(worktree_stage_logs))
                     canonical["refcount"] = canonical.get("refcount", 0) + 1
                     self._req_to_canon[instance_id] = canonical_id
                     self._req_worktrees[instance_id] = worktree_path
@@ -748,6 +774,21 @@ class SWEbenchSandboxTool(BaseTool):
         return float(self._instances[instance_id].get("last_reward", 0.0))
 
     async def release(self, instance_id: str, **kwargs) -> None:  # noqa: D401
+        # Use reference counting - only delete when all tools are done
+        record = self._instances.get(instance_id)
+        if not record:
+            return
+        
+        # Decrement reference count
+        ref_count = record.get("ref_count", 1)
+        ref_count -= 1
+        
+        if ref_count > 0:
+            # Other tools still using this sandbox
+            record["ref_count"] = ref_count
+            return
+        
+        # ref_count reached 0, now we can actually release
         record = self._instances.pop(instance_id, None)
         if not record:
             return
@@ -763,6 +804,7 @@ class SWEbenchSandboxTool(BaseTool):
             with canonical["lock"]:
                 if sbox is not None and worktree_path:
                     try:
+                        # Remove the worktree and prune
                         self._run_command(
                             sbox,
                             f"git -C {self.repo_path} worktree remove -f {worktree_path}",
@@ -771,7 +813,11 @@ class SWEbenchSandboxTool(BaseTool):
                             allow_error=True,
                         )
                         self._run_command(
-                            sbox, f"git -C {self.repo_path} worktree prune", timeout=60, desc="Prune worktrees", allow_error=True
+                            sbox,
+                            f"git -C {self.repo_path} worktree prune",
+                            timeout=60,
+                            desc="Prune worktrees",
+                            allow_error=True,
                         )
                     except Exception:  # pragma: no cover
                         LOGGER.exception("Failed to remove worktree %s", worktree_path)

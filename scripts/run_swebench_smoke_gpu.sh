@@ -1,3 +1,4 @@
+export NCCL_DEBUG=WARN
 export DATA_ROOT=${DATA_ROOT:-~/data/swebench_mini}
 DATA_ROOT=$(python - <<'PY'
 import os
