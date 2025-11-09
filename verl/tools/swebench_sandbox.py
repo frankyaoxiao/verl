@@ -152,6 +152,13 @@ class SWEbenchSandboxTool(BaseTool):
         self.log_dir: Optional[Path] = Path(os.path.expanduser(log_dir)).expanduser() if log_dir else None
         if self.log_dir is not None:
             self.log_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Timing directory for tracking operation durations
+        timing_dir = config.get("timing_dir", os.getenv("VERL_TIMING_DIR", "tmp/timing"))
+        self.timing_dir: Optional[Path] = Path(os.path.expanduser(timing_dir)).expanduser() if timing_dir else None
+        if self.timing_dir is not None:
+            self.timing_dir.mkdir(parents=True, exist_ok=True)
+        
         self.model_name = config.get("model_name", "verl_agent")
         # Output truncation for tool responses (extensible caps)
         self.max_output_tokens: int = int(config.get("max_output_tokens", 10_000))
@@ -159,31 +166,20 @@ class SWEbenchSandboxTool(BaseTool):
         self.truncate_side: str = str(config.get("truncate_side", "middle"))
         self.mode: str = str(config.get("mode", "legacy")).lower()
 
+        # Simplified state management - just track active sandbox instances
         state_key = self._config_state_key(config)
         state = self._STATE_REGISTRY.setdefault(
             state_key,
             {
                 "instances": {},
-                "canonicals_lock": threading.Lock(),
-                "canonicals": {},
-                "req_to_canon": {},
-                "req_worktrees": {},
                 "create_lock": threading.Lock(),
                 "pending_events": {},
             },
         )
         self._state_key = state_key
         self._instances = state["instances"]
-        self._canonicals_lock = state["canonicals_lock"]
-        self._canonicals = state["canonicals"]
-        self._req_to_canon = state["req_to_canon"]
-        self._req_worktrees = state["req_worktrees"]
         self._create_lock = state["create_lock"]
         self._pending_events: dict[str, asyncio.Event] = state["pending_events"]
-
-        # Worktree mode settings for per-question persistent sandboxes.
-        self.worktree_mode: bool = config.get("worktree_mode", False)
-        self.worktree_root: str = config.get("worktree_root", posixpath.join(self.workspace, "worktrees"))
 
     @staticmethod
     def _short_env_hash(env_image_key: str) -> str:
@@ -245,19 +241,17 @@ class SWEbenchSandboxTool(BaseTool):
         request_id: Optional[str] = None,
         **kwargs,
     ) -> tuple[str, ToolResponse]:
-        # SGLang passes request_id positionally while our dataset metadata also
-        # encodes an instance_id inside create_kwargs. Prefer the explicit value
-        # if provided and avoid duplicate binding errors.
+        """Create a new sandbox instance from a pre-built template.
+        
+        The new simplified architecture:
+        1. Determine which template to use based on (repo, env_hash)
+        2. Spawn a fresh E2B sandbox from that template
+        3. Git checkout to the specific base_commit
+        4. Done! No worktrees, no sharing, just clean simple sandboxes
+        """
+        # Extract instance_id from various sources
         embedded_instance_id = kwargs.pop("instance_id", None)
         instance_id = request_id or embedded_instance_id
-        if request_id is not None and embedded_instance_id is not None and request_id != embedded_instance_id:
-            # Keep the first occurrence (SGLang request id) and drop the
-            # embedded copy so kwargs don't carry both.
-            logging.getLogger(__name__).debug(
-                "Ignoring embedded instance_id %s; using request id %s",
-                embedded_instance_id,
-                request_id,
-            )
         if instance_id is None:
             instance_id = str(uuid4())
 
@@ -268,12 +262,12 @@ class SWEbenchSandboxTool(BaseTool):
         if dataset_instance is None:
             raise ValueError("dataset_instance is required in tools_kwargs for SWEbench execution")
 
+        # Check if already exists (shouldn't happen, but handle it)
         while True:
             with self._create_lock:
                 existing = self._instances.get(instance_id)
                 if existing is not None:
-                    # Increment reference count since another tool is using this sandbox
-                    existing["ref_count"] = existing.get("ref_count", 1) + 1
+                    LOGGER.warning(f"Instance {instance_id[:8]} already exists, reusing it")
                     return instance_id, ToolResponse()
                 wait_event = self._pending_events.get(instance_id)
                 if wait_event is None:
@@ -283,433 +277,109 @@ class SWEbenchSandboxTool(BaseTool):
             await wait_event.wait()
 
         try:
-            # This executor installs dependencies per sandbox run; disable for now if too slow.
+            # Create test spec
             test_spec: TestSpec = make_test_spec(dataset_instance)
-            if self.repo_path != "/testbed":
-                for attr in ("repo_script_list", "env_script_list", "eval_script_list"):
-                    setattr(
-                        test_spec,
-                        attr,
-                        [cmd.replace("/testbed", self.repo_path) for cmd in getattr(test_spec, attr)],
-                    )
-    
+            
             record: dict[str, Any] = {
                 "dataset_instance": dataset_instance,
                 "test_spec": test_spec,
                 "last_reward": 0.0,
                 "logs": {},
-                "ref_count": 1,  # Reference counting for shared sandboxes
             }
     
             if not self.enable_e2b:
                 self._instances[instance_id] = record
                 return instance_id, ToolResponse()
     
+            # Determine which template to use
             sandbox_kwargs: dict[str, Any] = {"timeout": self.timeout_seconds}
-            # Template selection priority:
-            # 1) Per-request override from create_kwargs (e.g., dataset-provided)
-            # 2) Tool-level default from config
-            req_template = None
-            try:
-                req_template = (kwargs.get("template") or {}).get("alias")  # tolerate structured input
-            except Exception:
-                req_template = kwargs.get("template")
-            create_kwargs_template = None
-            if isinstance(kwargs.get("create_kwargs"), dict):
-                create_kwargs_template = kwargs["create_kwargs"].get("template")
-            # Treat empty config template as unset so defaults can apply
-            cfg_tmpl = self.template if (isinstance(self.template, str) and self.template.strip()) else None
-            chosen_template = create_kwargs_template or req_template or cfg_tmpl
-    
-            # If we already have a chosen template (request or config), pass it to sandbox creation
-            if chosen_template:
-                sandbox_kwargs["template"] = chosen_template
-                # If a non-default template alias is explicitly provided (via request or config),
-                # align to the prewarmed template layout under /workspace.
-                # We consider 'swebench-conda' the legacy default that uses /home/user.
-                if (create_kwargs_template or req_template) and isinstance(chosen_template, str):
-                    if chosen_template.strip() and chosen_template.strip() != "swebench-conda":
-                        self.workspace = "/workspace"
-                        self.repo_path = posixpath.join(self.workspace, "testbed")
-                        self.worktree_root = posixpath.join(self.workspace, "worktrees")
-    
-            # Auto-select a per-repo template if enabled and no explicit override provided
-            used_auto_template = False
-            auto_alias = None
-            original_paths = (self.workspace, self.repo_path, self.worktree_root)
-            if not (create_kwargs_template or req_template) and self.auto_template:
+            
+            # Template selection: auto-generate from (repo, env_hash)
+            template_alias = None
+            if self.auto_template:
                 try:
                     env_key = test_spec.env_image_key
                     repo = dataset_instance.get("repo")
                     if env_key and repo:
                         env_hash = self._short_env_hash(env_key)
-                        auto_alias = f"{self.alias_prefix}-{self._safe_repo_alias(repo)}-{env_hash}"
-                        sandbox_kwargs["template"] = auto_alias
-                        chosen_template = auto_alias
-                        used_auto_template = True
-                        # When using a prewarmed per-repo template, prefer /workspace layout
-                        self.workspace = "/workspace"
-                        self.repo_path = posixpath.join(self.workspace, "testbed")
-                        self.worktree_root = posixpath.join(self.workspace, "worktrees")
-                except Exception:
-                    # Best-effort: if anything fails, keep defaults and fall back later
-                    auto_alias = None
-                    used_auto_template = False
-            # Log and stage configuration summary for debugging
-            config_summary = textwrap.dedent(
-                f"""
-                Configuration
-                template: {chosen_template or '(default)'}
-                prewarm: {self.prewarm} (env={self.prewarm_env_name})
-                workspace: {self.workspace}
-                repo_path: {self.repo_path}
-                worktree_mode: {self.worktree_mode}
-                worktree_root: {self.worktree_root}
-                timeout: {self.timeout_seconds}s
-                """
-            ).strip()
-            LOGGER.info(config_summary.replace("\n", " | "))
+                        template_alias = f"{self.alias_prefix}-{self._safe_repo_alias(repo)}-{env_hash}"
+                        sandbox_kwargs["template"] = template_alias
+                        LOGGER.info(f"[template-selection] Using auto-generated template: {template_alias}")
+                except Exception as exc:
+                    LOGGER.warning(f"[template-selection] Failed to auto-generate template name: {exc}")
+                    template_alias = None
+            
+            # Fall back to configured template if auto-selection failed
+            if not template_alias and self.template:
+                template_alias = self.template
+                sandbox_kwargs["template"] = template_alias
+                LOGGER.info(f"[template-selection] Using configured template: {template_alias}")
     
-            # Extra selection diagnostics
             LOGGER.info(
-                "[template-selection] req_template=%s create_kwargs_template=%s config_template=%s auto_template=%s "
-                "computed_auto_alias=%s used_auto=%s final_template=%s",
-                req_template,
-                create_kwargs_template,
-                self.template,
-                self.auto_template,
-                auto_alias,
-                used_auto_template,
-                chosen_template,
+                f"[TIMING] {instance_id[:8]} - Starting sandbox creation (template={template_alias or 'default'})"
+            )
+            t_start = time.time()
+            
+            # Run sandbox creation in thread pool to avoid blocking event loop
+            def _create_and_checkout():
+                # Create E2B sandbox from template
+                sandbox = E2BSandbox.create(**sandbox_kwargs)
+                
+                LOGGER.info(
+                    f"[SANDBOX] Created sandbox from template={template_alias or 'default'}, "
+                    f"sandbox_id={sandbox.sandbox_id}"
+                )
+                
+                # Git checkout to the specific base commit
+                # The template already has the repo cloned at /workspace/testbed
+                base_commit = dataset_instance["base_commit"]
+                checkout_cmd = f"cd {self.repo_path} && git checkout {base_commit}"
+                
+                checkout_result = self._run_command(
+                    sandbox,
+                    checkout_cmd,
+                    timeout=60,
+                    desc=f"Checkout {base_commit[:8]}",
+                    allow_error=False,
+                )
+                
+                LOGGER.info(
+                    f"[GIT] Checked out {base_commit[:8]} (exit_code={checkout_result.exit_code})"
+                )
+                
+                return sandbox
+            
+            # Execute in thread pool
+            sandbox = await asyncio.to_thread(_create_and_checkout)
+            
+            total_elapsed = time.time() - t_start
+            LOGGER.info(f"[TIMING] {instance_id[:8]} - Sandbox ready in {total_elapsed:.2f}s")
+            
+            # Store in registry
+            record["sandbox"] = sandbox
+            self._instances[instance_id] = record
+            
+            # Log timing data
+            self._log_timing(
+                request_id=instance_id,
+                operation="sandbox_setup",
+                duration=total_elapsed,
+                instance_id=dataset_instance.get("instance_id", "unknown"),
+                worktree_mode=False  # No more worktrees!
             )
     
-            sandbox: Optional[E2BSandbox] = None
-            stage_logs: list[str] = []
-            stage_logs.append(config_summary)
-    
-            def _ensure_canonical_and_worktree():
-                nonlocal sandbox, stage_logs
-                canonical_id = dataset_instance.get("instance_id", instance_id)
-                # Create per-canonical entry and lock if absent
-                with self._canonicals_lock:
-                    if canonical_id not in self._canonicals:
-                        self._canonicals[canonical_id] = {"lock": threading.Lock(), "initialized": False}
-                canonical = self._canonicals[canonical_id]
-                with canonical["lock"]:
-                    if not canonical.get("initialized", False):
-                        t_start = time.time()
-                        LOGGER.info(f"[TIMING] {canonical_id[:8]} - Starting E2B sandbox creation")
-                        # Try creating sandbox; if auto-template fails, fall back to default template
-                        try:
-                            sbox = E2BSandbox.create(**sandbox_kwargs)
-                        except Exception as exc:
-                            if used_auto_template and self.template and sandbox_kwargs.get("template") != self.template:
-                                LOGGER.info(
-                                    f"[INFO] Auto template '{sandbox_kwargs.get('template')}' failed ({exc}); falling back to '{self.template}'"
-                                )
-                                # Restore original paths for default template layout if we changed them
-                                self.workspace, self.repo_path, self.worktree_root = original_paths
-                                sandbox_kwargs["template"] = self.template
-                                sbox = E2BSandbox.create(**sandbox_kwargs)
-                            else:
-                                raise
-                        LOGGER.info(
-                            "[SANDBOX] Created template=%s workspace=%s repo_path=%s worktree_root=%s",
-                            sandbox_kwargs.get("template"),
-                            self.workspace,
-                            self.repo_path,
-                            self.worktree_root,
-                        )
-                        # Quick env diagnostics inside sandbox (best-effort)
-                        mc = self._run_command(
-                            sbox,
-                            "bash -lc 'test -d /opt/miniconda3 && echo HAS_MINICONDA || echo NO_MINICONDA'",
-                            timeout=30,
-                            desc="check miniconda",
-                            allow_error=True,
-                        )
-                        LOGGER.info("[ENV] /opt/miniconda3 present: %s", "HAS_MINICONDA" in (mc.stdout or ""))
-                        try:
-                            prewarm_present = self._env_exists(sbox)
-                        except Exception:
-                            prewarm_present = False
-                        LOGGER.info(
-                            "[ENV] prewarmed_env('%s') present: %s",
-                            self.prewarm_env_name,
-                            prewarm_present,
-                        )
-                        canonical.update(
-                            {
-                                "sandbox": sbox,
-                                "refcount": 0,
-                                "root_repo_path": self.repo_path,
-                                "worktree_root": self.worktree_root,
-                            }
-                        )
-                        LOGGER.info(
-                            f"[TIMING] {canonical_id[:8]} - E2B sandbox created in {time.time() - t_start:.2f}s"
-                        )
-                        # Prepare workspace and ToS
-                        self._run_command(sbox, f"mkdir -p {self.workspace}", timeout=60, desc="prepare workspace")
-                        self._run_command(sbox, f"mkdir -p {self.worktree_root}", timeout=60, desc="prepare worktree root")
-                        tos_cmd = (
-                            "bash -lc '"
-                            "source /opt/miniconda3/etc/profile.d/conda.sh && "
-                            "conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && "
-                            "conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r'"
-                        )
-                        tos_result = self._run_command(
-                            sbox, tos_cmd, timeout=120, desc="Accept conda ToS", allow_error=True
-                        )
-                        stage_logs.append(self._format_stage("Conda terms acceptance", tos_result))
-                        # Env setup
-                        t_env_start = time.time()
-                        LOGGER.info(f"[TIMING] {canonical_id[:8]} - Starting environment setup")
-                        if self.prewarm and self._env_exists(sbox):
-                            # Skip running env script if template is pre-warmed.
-                            msg = f"Prewarmed env '{self.prewarm_env_name}' detected; skipping env setup."
-                            LOGGER.info("[ENV] %s", msg)
-                            env_result = SimpleNamespace(exit_code=0, stdout=msg, stderr="")
-                        else:
-                            env_result = self._run_script(
-                                sbox,
-                                script_content=test_spec.setup_env_script,
-                                remote_name="setup_env.sh",
-                                timeout=self.env_setup_timeout_seconds,
-                                stage_name="Environment setup",
-                            )
-                        stage_logs.append(self._format_stage("Environment setup", env_result))
-                        LOGGER.info(
-                            f"[TIMING] {canonical_id[:8]} - Environment setup completed in {time.time() - t_env_start:.2f}s"
-                        )
-                        # Repo install once (fast path via local mirror if available)
-                        self._run_command(
-                            sbox, f"rm -rf {self.repo_path}", timeout=60, desc="clean testbed directory", allow_error=True
-                        )
-                        t_repo_start = time.time()
-                        LOGGER.info(f"[TIMING] {canonical_id[:8]} - Starting repository setup")
-                        owner_repo = dataset_instance.get("repo")
-                        mirror_path = posixpath.join("/opt/mirror", owner_repo + ".git") if owner_repo else None
-                        fast_repo_ok = False
-                        if mirror_path:
-                            check = self._run_command(
-                                sbox,
-                                f"bash -lc 'test -d {mirror_path}'",
-                                timeout=30,
-                                desc="check mirror",
-                                allow_error=True,
-                            )
-                            if check.exit_code == 0:
-                                cmds = [
-                                    # Mark the mirror path as safe to satisfy git's ownership checks
-                                    f"git config --global --add safe.directory {mirror_path}",
-                                    f"git clone --shared {mirror_path} {self.repo_path}",
-                                    f"git -C {self.repo_path} reset --hard {dataset_instance['base_commit']}",
-                                    f"git -C {self.repo_path} remote remove origin || true",
-                                    f"git -C {self.repo_path} config --global --add safe.directory {self.repo_path}",
-                                ]
-                                for c in cmds:
-                                    res = self._run_command(
-                                        sbox,
-                                        c,
-                                        timeout=self.repo_setup_timeout_seconds,
-                                        desc=f"Fast repo setup ({c})",
-                                        cwd=self.workspace,
-                                        allow_error=False,
-                                    )
-                                    stage_logs.append(self._format_stage("Repository setup (fast)", res))
-                                fast_repo_ok = True
-                        if not fast_repo_ok:
-                            repo_result = self._run_script(
-                                sbox,
-                                script_content=test_spec.install_repo_script,
-                                remote_name="install_repo.sh",
-                                timeout=self.repo_setup_timeout_seconds,
-                                stage_name="Repository setup",
-                            )
-                            stage_logs.append(self._format_stage("Repository setup", repo_result))
-                        LOGGER.info(
-                            f"[TIMING] {canonical_id[:8]} - Repository setup completed in {time.time() - t_repo_start:.2f}s"
-                        )
-                        canonical["initialized"] = True
-                        self._persist_logs(canonical_id, "setup", "\n\n".join(stage_logs))
-    
-                    # Add a per-request worktree at the target base commit
-                    sbox = canonical["sandbox"]
-                    worktree_path = posixpath.join(self.worktree_root, instance_id)
-                    base_commit = dataset_instance["base_commit"]
-                    worktree_stage_logs: list[str] = []
-                    t_wt_start = time.time()
-                    # Ensure worktree root exists
-                    wt_root_res = self._run_command(
-                        sbox, f"mkdir -p {self.worktree_root}", timeout=60, desc="mkdir worktrees root", allow_error=False
-                    )
-                    worktree_stage_logs.append(self._format_stage("Worktree: mkdir root", wt_root_res))
-                    # Create worktree (retry with prune if needed)
-                    add_cmd = f"git -C {self.repo_path} worktree add -f {worktree_path} {base_commit}"
-                    wt_add = self._run_command(
-                        sbox, add_cmd, timeout=self.repo_setup_timeout_seconds, desc="Worktree: add", allow_error=True
-                    )
-                    worktree_stage_logs.append(self._format_stage("Worktree: add", wt_add))
-                    if wt_add.exit_code != 0:
-                        wt_prune = self._run_command(
-                            sbox,
-                            f"git -C {self.repo_path} worktree prune",
-                            timeout=120,
-                            desc="Worktree: prune",
-                            allow_error=True,
-                        )
-                        worktree_stage_logs.append(self._format_stage("Worktree: prune", wt_prune))
-                        wt_add_retry = self._run_command(
-                            sbox,
-                            add_cmd,
-                            timeout=self.repo_setup_timeout_seconds,
-                            desc="Worktree: add (retry)",
-                            allow_error=False,
-                        )
-                        worktree_stage_logs.append(self._format_stage("Worktree: add (retry)", wt_add_retry))
-                    wt_safe = self._run_command(
-                        sbox,
-                        f"git config --global --add safe.directory {worktree_path}",
-                        timeout=60,
-                        desc="Worktree: mark safe",
-                        allow_error=True,
-                    )
-                    worktree_stage_logs.append(self._format_stage("Worktree: mark safe", wt_safe))
-                    LOGGER.info(
-                        f"[TIMING] {canonical_id[:8]} - Worktree setup completed in {time.time() - t_wt_start:.2f}s"
-                    )
-                    self._persist_logs(instance_id, "worktree_setup", "\n\n".join(worktree_stage_logs))
-                    canonical["refcount"] = canonical.get("refcount", 0) + 1
-                    self._req_to_canon[instance_id] = canonical_id
-                    self._req_worktrees[instance_id] = worktree_path
-                    record["sandbox"] = sbox
-                    record["worktree_path"] = worktree_path
-                    record["canonical_id"] = canonical_id
-                    self._instances[instance_id] = record
-    
-            # Legacy single-sandbox setup per request
-            def _do_setup():
-                nonlocal sandbox, stage_logs
-                # Create sandbox (synchronous)
-                t_start = time.time()
-                LOGGER.info(f"[TIMING] {instance_id[:8]} - Starting E2B sandbox creation")
-                try:
-                    sandbox = E2BSandbox.create(**sandbox_kwargs)
-                except Exception as exc:
-                    if used_auto_template and self.template and sandbox_kwargs.get("template") != self.template:
-                        LOGGER.info(
-                            f"[INFO] Auto template '{sandbox_kwargs.get('template')}' failed ({exc}); falling back to '{self.template}'"
-                        )
-                        self.workspace, self.repo_path, self.worktree_root = original_paths
-                        sandbox_kwargs["template"] = self.template
-                        sandbox = E2BSandbox.create(**sandbox_kwargs)
-                    else:
-                        raise
-                record["sandbox"] = sandbox
-                LOGGER.info(f"[TIMING] {instance_id[:8]} - E2B sandbox created in {time.time() - t_start:.2f}s")
-                LOGGER.info(
-                    "[SANDBOX] Created template=%s workspace=%s repo_path=%s worktree_root=%s",
-                    sandbox_kwargs.get("template"),
-                    self.workspace,
-                    self.repo_path,
-                    self.worktree_root,
-                )
-    
-                # Prepare workspace directory and permissions.
-                self._run_command(
-                    sandbox,
-                    f"mkdir -p {self.workspace}",
-                    timeout=60,
-                    desc="prepare workspace",
-                )
-                # Accept conda terms (best-effort).
-                tos_cmd = (
-                    "bash -lc '"
-                    "source /opt/miniconda3/etc/profile.d/conda.sh && "
-                    "conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && "
-                    "conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r'"
-                )
-                tos_result = self._run_command(
-                    sandbox,
-                    tos_cmd,
-                    timeout=120,
-                    desc="Accept conda ToS",
-                    allow_error=True,
-                )
-                stage_logs.append(self._format_stage("Conda terms acceptance", tos_result))
-    
-                t_env_start = time.time()
-                LOGGER.info(f"[TIMING] {instance_id[:8]} - Starting environment setup")
-                if self.prewarm and self._env_exists(sandbox):
-                    msg = f"Prewarmed env '{self.prewarm_env_name}' detected; skipping env setup."
-                    LOGGER.info("[ENV] %s", msg)
-                    env_result = SimpleNamespace(exit_code=0, stdout=msg, stderr="")
-                else:
-                    env_result = self._run_script(
-                        sandbox,
-                        script_content=test_spec.setup_env_script,
-                        remote_name="setup_env.sh",
-                        timeout=self.env_setup_timeout_seconds,
-                        stage_name="Environment setup",
-                    )
-                stage_logs.append(self._format_stage("Environment setup", env_result))
-                LOGGER.info(f"[TIMING] {instance_id[:8]} - Environment setup completed in {time.time() - t_env_start:.2f}s")
-    
-                # Safety: Remove repo_path if it exists before running install_repo_script.
-                self._run_command(
-                    sandbox,
-                    f"rm -rf {self.repo_path}",
-                    timeout=60,
-                    desc="clean testbed directory",
-                    allow_error=True,
-                )
-    
-                t_repo_start = time.time()
-                LOGGER.info(f"[TIMING] {instance_id[:8]} - Starting repository setup")
-                repo_result = self._run_script(
-                    sandbox,
-                    script_content=test_spec.install_repo_script,
-                    remote_name="install_repo.sh",
-                    timeout=self.repo_setup_timeout_seconds,
-                    stage_name="Repository setup",
-                )
-                stage_logs.append(self._format_stage("Repository setup", repo_result))
-                LOGGER.info(f"[TIMING] {instance_id[:8]} - Repository setup completed in {time.time() - t_repo_start:.2f}s")
-    
-                record["logs"]["setup"] = "\n\n".join(stage_logs)
-                self._persist_logs(instance_id, "setup", record["logs"]["setup"])
-                self._instances[instance_id] = record
-    
-            try:
-                t_total_start = time.time()
-                if self.worktree_mode:
-                    LOGGER.info(
-                        f"[TIMING] {instance_id[:8]} - Starting canonical/worktree setup (worktree_mode=True)"
-                    )
-                    await asyncio.to_thread(_ensure_canonical_and_worktree)
-                else:
-                    LOGGER.info(
-                        f"[TIMING] {instance_id[:8]} - Starting complete sandbox setup (create + env + repo)"
-                    )
-                    await asyncio.to_thread(_do_setup)
-                total_elapsed = time.time() - t_total_start
-                LOGGER.info(f"[TIMING] {instance_id[:8]} - Total sandbox setup completed in {total_elapsed:.2f}s")
-    
-                return instance_id, ToolResponse()
-            except Exception as exc:
-                if sandbox is not None:
-                    try:
-                        sandbox.kill()
-                    except Exception:  # pragma: no cover - best effort cleanup
-                        pass
-                raise exc
+            return instance_id, ToolResponse()
+            
+        except Exception as exc:
+            LOGGER.error(f"[ERROR] Failed to create sandbox: {exc}")
+            raise exc
     
         finally:
             with self._create_lock:
                 event = self._pending_events.pop(instance_id, None)
             if event is not None:
                 event.set()
+
     @rollout_trace_op
     async def execute(
         self,
@@ -766,6 +436,15 @@ class SWEbenchSandboxTool(BaseTool):
         elapsed = time.time() - start_time
         label = "submit_solution" if mode == "submit_solution" else ("bash" if mode == "bash" else action)
         LOGGER.info(f"[TIMING] {instance_id[:8]} - Completed {label} in {elapsed:.2f}s")
+        
+        # Log timing data to file for analysis
+        self._log_timing(
+            request_id=instance_id,
+            operation=label,
+            duration=elapsed,
+            instance_id=record.get("dataset_instance", {}).get("instance_id", "unknown")
+        )
+        
         return result
 
     async def calc_reward(self, instance_id: str, **kwargs) -> float:  # noqa: D401
@@ -774,66 +453,18 @@ class SWEbenchSandboxTool(BaseTool):
         return float(self._instances[instance_id].get("last_reward", 0.0))
 
     async def release(self, instance_id: str, **kwargs) -> None:  # noqa: D401
-        # Use reference counting - only delete when all tools are done
-        record = self._instances.get(instance_id)
-        if not record:
-            return
+        """Release a sandbox instance by killing it.
         
-        # Decrement reference count
-        ref_count = record.get("ref_count", 1)
-        ref_count -= 1
-        
-        if ref_count > 0:
-            # Other tools still using this sandbox
-            record["ref_count"] = ref_count
-            return
-        
-        # ref_count reached 0, now we can actually release
+        Simplified: just kill the sandbox. No worktrees, no sharing, no reference counting.
+        """
         record = self._instances.pop(instance_id, None)
         if not record:
             return
-        if self.worktree_mode and self.enable_e2b:
-            canonical_id = record.get("canonical_id") or self._req_to_canon.pop(instance_id, None)
-            worktree_path = record.get("worktree_path") or self._req_worktrees.pop(instance_id, None)
-            if canonical_id is None:
-                return
-            canonical = self._canonicals.get(canonical_id)
-            if canonical is None:
-                return
-            sbox: Optional[E2BSandbox] = canonical.get("sandbox")
-            with canonical["lock"]:
-                if sbox is not None and worktree_path:
-                    try:
-                        # Remove the worktree and prune
-                        self._run_command(
-                            sbox,
-                            f"git -C {self.repo_path} worktree remove -f {worktree_path}",
-                            timeout=120,
-                            desc="Remove worktree",
-                            allow_error=True,
-                        )
-                        self._run_command(
-                            sbox,
-                            f"git -C {self.repo_path} worktree prune",
-                            timeout=60,
-                            desc="Prune worktrees",
-                            allow_error=True,
-                        )
-                    except Exception:  # pragma: no cover
-                        LOGGER.exception("Failed to remove worktree %s", worktree_path)
-                canonical["refcount"] = max(0, canonical.get("refcount", 1) - 1)
-                if canonical["refcount"] == 0 and sbox is not None:
-                    try:
-                        sbox.kill()
-                    except Exception:  # pragma: no cover
-                        LOGGER.exception("Failed to close canonical sandbox for %s", canonical_id)
-                    self._canonicals.pop(canonical_id, None)
-            return
-
-        # Legacy one-sandbox-per-request behavior
+        
         sandbox: Optional[E2BSandbox] = record.get("sandbox")
         if sandbox is not None:
             try:
+                LOGGER.info(f"[RELEASE] Killing sandbox for {instance_id[:8]}")
                 sandbox.kill()
             except Exception:  # pragma: no cover - best effort cleanup
                 LOGGER.exception("Failed to close sandbox for %s", instance_id)
@@ -923,6 +554,27 @@ class SWEbenchSandboxTool(BaseTool):
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         log_path = self.log_dir / f"{instance_id}_{status}_{timestamp}.log"
         log_path.write_text(log_text)
+    
+    def _log_timing(self, request_id: str, operation: str, duration: float, **metadata) -> None:
+        """Log timing data to a JSON file for post-analysis."""
+        if self.timing_dir is None:
+            return
+        
+        timing_entry = {
+            "timestamp": time.time(),
+            "request_id": request_id,
+            "operation": operation,
+            "duration_seconds": duration,
+            "mode": self.mode,
+            **metadata
+        }
+        
+        # Append to a daily timing log file
+        date_str = time.strftime("%Y%m%d")
+        timing_file = self.timing_dir / f"timing_{date_str}.jsonl"
+        
+        with open(timing_file, 'a') as f:
+            f.write(json.dumps(timing_entry) + '\n')
 
     def _run_script(
         self,

@@ -9,6 +9,11 @@ export DATA_ROOT
 
 export RUN_TRAIN=${RUN_TRAIN:-1}
 
+# Enable pre-built templates (new simplified architecture)
+export SWEBENCH_TEMPLATES_ENABLE=1
+export SWEBENCH_ALIAS_PREFIX=swebench
+export SWEBENCH_PREWARMED=1
+
 
 ./tests/special_e2e/ppo_trainer/run_swebench_smoke.sh "$@"
 

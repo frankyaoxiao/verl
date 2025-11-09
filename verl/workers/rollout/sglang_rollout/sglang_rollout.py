@@ -944,6 +944,15 @@ class SGLangRollout(BaseRollout):
                     _dump_conversation_snapshot()
                     for tool_call, (resp, reward, metrics) in zip(parsed_tool_calls, tool_call_results, strict=True):
                         _req.update_metrics(metrics, tool_call.function.name)
+                    
+                    # Check if any tool is a terminal tool (submit_solution or submit_patch)
+                    # These tools should end the rollout immediately
+                    terminal_tools = {"submit_solution", "submit_patch"}
+                    if any(tool_call.function.name in terminal_tools for tool_call in parsed_tool_calls):
+                        logger.info(f"[TIMING] {_req.request_id[:8]} - Terminal tool called, ending rollout")
+                        finish_reason_type = FinishReasonTypeEnum.STOP
+                        break
+                    
                     if len(_req.input_ids) >= self.config.max_model_len:
                         finish_reason_type = FinishReasonTypeEnum.STOP
                         break

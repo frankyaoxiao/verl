@@ -160,12 +160,13 @@ USER user
 
         if packages == "environment.yml":
             env_yml = get_environment_yml(ex, cfg.env_name)
-            local_env_yml = pathlib.Path(cfg.artifacts_dir) / f"{_safe_repo_alias(repo)}_{env_hash}_environment.yml"
+            env_yml_name = f"{_safe_repo_alias(repo)}_{env_hash}_environment.yml"
+            local_env_yml = pathlib.Path(cfg.artifacts_dir) / env_yml_name
             _write_text(local_env_yml, env_yml)
             dockerfile += "\n" + f"""
 # --- SWEbench environment (environment.yml) ---
 USER root
-COPY {local_env_yml.as_posix()} /root/environment.yml
+COPY {env_yml_name} /root/environment.yml
 RUN bash -lc "source {cfg.conda_prefix}/bin/activate && conda env create -f /root/environment.yml"
 """
             if python_ver:
@@ -175,13 +176,14 @@ RUN bash -lc "source {cfg.conda_prefix}/bin/activate && conda env create -f /roo
             dockerfile += "USER user\n"
         elif packages == "requirements.txt":
             reqs_text = get_requirements(ex)
-            local_reqs = pathlib.Path(cfg.artifacts_dir) / f"{_safe_repo_alias(repo)}_{env_hash}_requirements.txt"
+            reqs_name = f"{_safe_repo_alias(repo)}_{env_hash}_requirements.txt"
+            local_reqs = pathlib.Path(cfg.artifacts_dir) / reqs_name
             _write_text(local_reqs, reqs_text)
             dockerfile += "\n" + f"""
 # --- SWEbench environment (requirements.txt) ---
 USER root
 RUN bash -lc "source {cfg.conda_prefix}/bin/activate && conda create -n {cfg.env_name} python={python_ver} -y"
-COPY {local_reqs.as_posix()} /root/requirements.txt
+COPY {reqs_name} /root/requirements.txt
 RUN bash -lc "source {cfg.conda_prefix}/bin/activate && conda activate {cfg.env_name} && python -m pip install -r /root/requirements.txt"
 USER user
 """
@@ -196,7 +198,51 @@ USER user
                 dockerfile += f"RUN bash -lc \"source {cfg.conda_prefix}/bin/activate && conda activate {cfg.env_name} && python -m pip install {' '.join(pip_packages)}\"\n"
             dockerfile += "USER user\n"
 
-        template = Template().from_dockerfile(dockerfile)
+        # Clone the repository from mirror to workspace and install
+        testbed_path = f"{cfg.workdir}/testbed"
+        install_script = getattr(spec, "install_repo_script", None)
+        
+        # Write install script to temp location BEFORE creating template
+        install_script_name = f"{_safe_repo_alias(repo)}_{env_hash}_install.sh"
+        local_install_script = pathlib.Path(cfg.artifacts_dir) / install_script_name
+        
+        if install_script:
+            # Rewrite /testbed -> our testbed_path in the script
+            rewritten_script = install_script.replace("/testbed", testbed_path)
+            # Replace GitHub clone with local mirror clone (handle both with and without .git)
+            github_url_with_git = f"https://github.com/{owner_repo}.git"
+            github_url_without_git = f"https://github.com/{owner_repo}"
+            mirror_path = f"/opt/mirror/{owner_repo}.git"
+            rewritten_script = rewritten_script.replace(github_url_with_git, mirror_path)
+            rewritten_script = rewritten_script.replace(github_url_without_git, mirror_path)
+            _write_text(local_install_script, rewritten_script)
+            
+            dockerfile += "\n" + f"""
+# --- Install repository (clone + dependencies) ---
+USER root
+RUN mkdir -p $(dirname {testbed_path})
+COPY {install_script_name} /root/install_repo.sh
+RUN bash -lc "source {cfg.conda_prefix}/bin/activate && conda activate {cfg.env_name} && bash /root/install_repo.sh"
+RUN cd {testbed_path} && git reset --hard HEAD~1
+RUN chmod -R 777 {testbed_path}
+USER user
+RUN git config --global --add safe.directory {testbed_path}
+RUN cd {testbed_path} && git config core.filemode false && git update-index --refresh || true
+"""
+        else:
+            # No install script, just clone
+            dockerfile += "\n" + f"""
+# --- Clone repository (no install script) ---
+USER root
+RUN mkdir -p {testbed_path}
+RUN git clone /opt/mirror/{owner_repo}.git {testbed_path}
+RUN chmod -R 777 {testbed_path}
+USER user
+RUN git config --global --add safe.directory {testbed_path}
+RUN cd {testbed_path} && git config core.filemode false && git update-index --refresh || true
+"""
+
+        template = Template(file_context_path=cfg.artifacts_dir, file_ignore_patterns=list(cfg.file_ignore_patterns)).from_dockerfile(dockerfile)
         Template.build(template, alias=alias, cpu_count=cfg.cpu_count, memory_mb=cfg.memory_mb, on_build_logs=default_build_logger())
 
 
