@@ -215,6 +215,8 @@ USER user
             mirror_path = f"/opt/mirror/{owner_repo}.git"
             rewritten_script = rewritten_script.replace(github_url_with_git, mirror_path)
             rewritten_script = rewritten_script.replace(github_url_without_git, mirror_path)
+            # Remove --single-branch flag to ensure all commits are available at runtime
+            rewritten_script = rewritten_script.replace("--single-branch", "")
             _write_text(local_install_script, rewritten_script)
             
             dockerfile += "\n" + f"""

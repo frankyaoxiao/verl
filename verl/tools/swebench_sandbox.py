@@ -304,6 +304,9 @@ class SWEbenchSandboxTool(BaseTool):
                         env_hash = self._short_env_hash(env_key)
                         template_alias = f"{self.alias_prefix}-{self._safe_repo_alias(repo)}-{env_hash}"
                         sandbox_kwargs["template"] = template_alias
+                        # When using pre-built templates, the repository is at /workspace/testbed
+                        self.workspace = "/workspace"
+                        self.repo_path = "/workspace/testbed"
                         LOGGER.info(f"[template-selection] Using auto-generated template: {template_alias}")
                 except Exception as exc:
                     LOGGER.warning(f"[template-selection] Failed to auto-generate template name: {exc}")
