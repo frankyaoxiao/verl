@@ -22,8 +22,6 @@ tools:
     truncate_side: ${oc.env:SWEBENCH_TOOL_TRUNCATE_SIDE,middle}
     prewarm: ${oc.env:SWEBENCH_PREWARMED,0}
     prewarm_env_name: ${oc.env:SWEBENCH_PREWARM_ENV_NAME,testbed}
-    worktree_mode: true
-    worktree_root: ${oc.env:SWEBENCH_WORKTREE_ROOT,/home/user/worktrees}
   tool_schema:
     type: function
     function:
