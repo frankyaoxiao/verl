@@ -608,6 +608,7 @@ class SWEbenchSandboxTool(BaseTool):
         timeout: int,
         stage_name: str,
         allow_error: bool = False,
+        cwd: Optional[str] = None,
     ) -> CommandResult:
         remote_path = self._remote_path(remote_name)
         self._write_remote_file(sandbox, remote_path, script_content)
@@ -617,6 +618,7 @@ class SWEbenchSandboxTool(BaseTool):
             timeout=timeout,
             desc=stage_name,
             allow_error=allow_error,
+            cwd=cwd,
         )
 
     def _evaluate_patch(self, dataset_instance: dict[str, Any], patch: str) -> tuple[str, str, float]:
@@ -778,6 +780,7 @@ class SWEbenchSandboxTool(BaseTool):
                 timeout=self.eval_timeout_seconds,
                 stage_name="Evaluation",
                 allow_error=True,
+                cwd=self.repo_path,  # Run from repository directory
             )
             stage_logs.append(self._format_stage("Evaluation", eval_result))
             eval_log = self._collect_output(eval_result)
@@ -991,6 +994,7 @@ class SWEbenchSandboxTool(BaseTool):
             timeout=self.eval_timeout_seconds,
             stage_name="Evaluation",
             allow_error=True,
+            cwd=repo_path,  # Run from repository directory
         )
         stage_logs.append(self._format_stage("Evaluation", eval_result))
         eval_log = self._collect_output(eval_result)
@@ -1072,6 +1076,7 @@ class SWEbenchSandboxTool(BaseTool):
             timeout=self.eval_timeout_seconds,
             stage_name="Evaluation",
             allow_error=True,
+            cwd=self.repo_path,  # Run from repository directory
         )
         stage_logs.append(self._format_stage("Evaluation", eval_result))
 
