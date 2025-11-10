@@ -174,12 +174,14 @@ class SWEbenchSandboxTool(BaseTool):
                 "instances": {},
                 "create_lock": threading.Lock(),
                 "pending_events": {},
+                "reward_cache": {},  # Cache rewards separately to handle multi-tool race conditions
             },
         )
         self._state_key = state_key
         self._instances = state["instances"]
         self._create_lock = state["create_lock"]
         self._pending_events: dict[str, asyncio.Event] = state["pending_events"]
+        self._reward_cache: dict[str, float] = state["reward_cache"]
 
     @staticmethod
     def _short_env_hash(env_image_key: str) -> str:
@@ -289,6 +291,7 @@ class SWEbenchSandboxTool(BaseTool):
     
             if not self.enable_e2b:
                 self._instances[instance_id] = record
+                self._reward_cache[instance_id] = 0.0  # Cache initial reward
                 return instance_id, ToolResponse()
     
             # Determine which template to use
@@ -361,14 +364,15 @@ class SWEbenchSandboxTool(BaseTool):
             # Store in registry
             record["sandbox"] = sandbox
             self._instances[instance_id] = record
+            # Cache initial reward for multi-tool cleanup
+            self._reward_cache[instance_id] = 0.0
             
             # Log timing data
             self._log_timing(
                 request_id=instance_id,
                 operation="sandbox_setup",
                 duration=total_elapsed,
-                instance_id=dataset_instance.get("instance_id", "unknown"),
-                worktree_mode=False  # No more worktrees!
+                instance_id=dataset_instance.get("instance_id", "unknown")
             )
     
             return instance_id, ToolResponse()
@@ -451,17 +455,33 @@ class SWEbenchSandboxTool(BaseTool):
         return result
 
     async def calc_reward(self, instance_id: str, **kwargs) -> float:  # noqa: D401
-        if instance_id not in self._instances:
-            raise ValueError(f"Unknown SWEbench sandbox instance: {instance_id}")
-        return float(self._instances[instance_id].get("last_reward", 0.0))
+        """Get the reward for an instance.
+        
+        Uses a separate reward cache to handle the case where multiple tools
+        (bash, submit_solution) share the same sandbox instance. When parallel
+        cleanup happens, one tool may release() the instance before another
+        tool calls calc_reward(). The cache ensures the reward persists.
+        """
+        # Check cache first (survives release)
+        if instance_id in self._reward_cache:
+            return self._reward_cache[instance_id]
+        # Fallback to instance record if still active
+        if instance_id in self._instances:
+            return float(self._instances[instance_id].get("last_reward", 0.0))
+        # Instance never existed or was released without reward
+        LOGGER.warning(f"No reward found for instance {instance_id[:8]}, returning 0.0")
+        return 0.0
 
     async def release(self, instance_id: str, **kwargs) -> None:  # noqa: D401
         """Release a sandbox instance by killing it.
         
         Simplified: just kill the sandbox. No worktrees, no sharing, no reference counting.
+        Note: We keep the reward in cache (not cleaned up) to handle race conditions where
+        multiple tools call calc_reward/release in parallel.
         """
         record = self._instances.pop(instance_id, None)
         if not record:
+            # Already released by another tool
             return
         
         sandbox: Optional[E2BSandbox] = record.get("sandbox")
@@ -793,15 +813,8 @@ class SWEbenchSandboxTool(BaseTool):
         if not command:
             return ToolResponse(text="Missing 'command' parameter for run_shell."), 0.0, {"status": "invalid_command"}
 
-        # Use per-request worktree if available
-        worktree_path = record.get("worktree_path")
-        cwd = worktree_path or self.repo_path
-        # Rewrite absolute repo paths in the command when using worktrees
-        if self.worktree_mode and worktree_path and self.repo_path and self.repo_path in command:
-            try:
-                command = command.replace(self.repo_path, worktree_path)
-            except Exception:
-                pass
+        # Execute command in repo directory
+        cwd = self.repo_path
         formatted_command = f"bash -lc {json.dumps(command)}"
         result = self._run_command(
             sandbox,
@@ -834,12 +847,9 @@ class SWEbenchSandboxTool(BaseTool):
             return ToolResponse(text="Missing 'path' parameter for read_file."), 0.0, {"status": "invalid_path"}
 
         # Resolve relative paths against worktree/repo root; rewrite absolute /workspace/testbed to worktree.
-        worktree_path = record.get("worktree_path")
+        # Resolve relative paths against repo root
         if not path.startswith("/"):
-            base_dir = worktree_path or self.repo_path
-            path = posixpath.join(base_dir, path)
-        elif self.worktree_mode and worktree_path and path.startswith(self.repo_path.rstrip("/")):
-            path = worktree_path + path[len(self.repo_path):]
+            path = posixpath.join(self.repo_path, path)
 
         try:
             content = sandbox.files.read(path)
@@ -882,12 +892,9 @@ class SWEbenchSandboxTool(BaseTool):
                 {"status": "invalid_parameters"},
             )
 
-        worktree_path = record.get("worktree_path")
+        # Resolve relative paths against repo root
         if not path.startswith("/"):
-            base_dir = worktree_path or self.repo_path
-            path = posixpath.join(base_dir, path)
-        elif self.worktree_mode and worktree_path and path.startswith(self.repo_path.rstrip("/")):
-            path = worktree_path + path[len(self.repo_path):]
+            path = posixpath.join(self.repo_path, path)
 
         try:
             sandbox.files.write(path, content)
@@ -915,6 +922,7 @@ class SWEbenchSandboxTool(BaseTool):
             status = "passed" if success else "failed"
             message = "E2B execution disabled. Offline comparison used."
             record["last_reward"] = reward
+            self._reward_cache[instance_id] = reward  # Cache for multi-tool cleanup
             return ToolResponse(text=message), reward, {"status": status}
 
         sandbox: E2BSandbox = record.get("sandbox")
@@ -925,8 +933,8 @@ class SWEbenchSandboxTool(BaseTool):
         dataset_instance = record["dataset_instance"]
         stage_logs: list[str] = []
 
-        # Use per-request worktree directory if present
-        repo_path = record.get("worktree_path", self.repo_path)
+        # Use repo directory
+        repo_path = self.repo_path
         base_commit = dataset_instance["base_commit"]
 
         # Clean working tree before applying patch.
@@ -961,6 +969,7 @@ class SWEbenchSandboxTool(BaseTool):
             log_text = "\n\n".join(stage_logs)
             self._persist_logs(instance_id, "patch_invalid", log_text)
             record["last_reward"] = 0.0
+            self._reward_cache[instance_id] = 0.0  # Cache for multi-tool cleanup
             resp_text = f"{log_text}\n\nPatch did not apply cleanly."
             return (ToolResponse(text=self._truncate_text_for_model(resp_text)), 0.0, {"status": "patch_invalid"})
 
@@ -990,6 +999,7 @@ class SWEbenchSandboxTool(BaseTool):
         status = "passed" if resolved else "failed"
         reward = 1.0 if resolved else 0.0
         record["last_reward"] = reward
+        self._reward_cache[instance_id] = reward  # Cache for multi-tool cleanup
 
         stage_logs.append("## Evaluation summary")
         summary = textwrap.dedent(
@@ -1039,35 +1049,21 @@ class SWEbenchSandboxTool(BaseTool):
 
         test_spec: TestSpec = record["test_spec"]
         dataset_instance = record["dataset_instance"]
-        worktree_path = record.get("worktree_path") or self.repo_path
 
         stage_logs: list[str] = []
 
-        git_status_cmd = (
-            f"bash -lc {json.dumps(f'cd {worktree_path} && git status --short --branch')}"
-            if worktree_path
-            else "bash -lc 'git status --short --branch'"
-        )
+        # Check git status in repo directory
         git_status = self._run_command(
             sandbox,
-            git_status_cmd,
+            "bash -lc 'git status --short --branch'",
             timeout=120,
             desc="git status",
-            cwd=worktree_path,
+            cwd=self.repo_path,
             allow_error=True,
         )
         stage_logs.append(self._format_stage("Git status", git_status))
 
         eval_script = test_spec.eval_script
-        if worktree_path and worktree_path != self.repo_path:
-            try:
-                eval_script = eval_script.replace(self.repo_path, worktree_path)
-            except Exception:  # pragma: no cover - best effort path rewrite
-                LOGGER.debug(
-                    "[submit_solution] Failed to rewrite repo_path '%s' to worktree '%s'",
-                    self.repo_path,
-                    worktree_path,
-                )
 
         eval_result = self._run_script(
             sandbox,
@@ -1083,6 +1079,8 @@ class SWEbenchSandboxTool(BaseTool):
         reward = 1.0 if resolved else 0.0
         status = "passed" if resolved else "failed"
         record["last_reward"] = reward
+        # Cache reward separately to survive race conditions when multiple tools release the same instance
+        self._reward_cache[instance_id] = reward
 
         stage_logs.append("## Evaluation summary")
         stage_logs.append(

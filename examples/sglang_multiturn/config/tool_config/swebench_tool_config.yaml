@@ -11,7 +11,7 @@ tools:
     env_setup_timeout_seconds: 1200
     repo_setup_timeout_seconds: 900
     eval_timeout_seconds: 900
-    repo_path: ${oc.env:SWEBENCH_REPO_PATH,/home/user/testbed}
+    repo_path: ${oc.env:SWEBENCH_REPO_PATH,/workspace/testbed}
     log_dir: tmp/verl_swebench_logs
     enable_e2b: true
     template: ${oc.env:SWEBENCH_TEMPLATE_ALIAS,swebench-conda}

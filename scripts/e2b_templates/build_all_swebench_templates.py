@@ -217,6 +217,10 @@ USER user
             rewritten_script = rewritten_script.replace(github_url_without_git, mirror_path)
             # Remove --single-branch flag to ensure all commits are available at runtime
             rewritten_script = rewritten_script.replace("--single-branch", "")
+            # CRITICAL: Disable git gc/prune commands that would delete unreachable commits
+            # We need ALL commits available at runtime, not just ancestors of the template commit
+            rewritten_script = rewritten_script.replace("git reflog expire", "# git reflog expire")
+            rewritten_script = rewritten_script.replace("git gc --prune", "# git gc --prune")
             _write_text(local_install_script, rewritten_script)
             
             dockerfile += "\n" + f"""
