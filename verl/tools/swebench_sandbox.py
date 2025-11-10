@@ -461,16 +461,37 @@ class SWEbenchSandboxTool(BaseTool):
         (bash, submit_solution) share the same sandbox instance. When parallel
         cleanup happens, one tool may release() the instance before another
         tool calls calc_reward(). The cache ensures the reward persists.
+        
+        If submit_solution tool calls calc_reward but evaluation hasn't run
+        (e.g., max turns reached without explicit submit), auto-run evaluation.
         """
+        # Check if instance exists
+        if instance_id not in self._instances:
+            # Already released - check cache
+            if instance_id in self._reward_cache:
+                return self._reward_cache[instance_id]
+            LOGGER.warning(f"No reward found for instance {instance_id[:8]}, returning 0.0")
+            return 0.0
+        
+        record = self._instances[instance_id]
+        
+        # If this is submit_solution mode and evaluation hasn't run, auto-submit
+        if self.mode == "submit_solution" and not record.get("evaluation_completed", False):
+            LOGGER.info(f"[AUTO-SUBMIT] {instance_id[:8]} - Running evaluation (max turns reached)")
+            try:
+                # Run submit_solution synchronously
+                _, reward, _ = self._execute_submit_solution(instance_id, record)
+                record["evaluation_completed"] = True
+                return reward
+            except Exception as exc:
+                LOGGER.exception(f"[AUTO-SUBMIT] Failed for {instance_id[:8]}: {exc}")
+                return 0.0
+        
         # Check cache first (survives release)
         if instance_id in self._reward_cache:
             return self._reward_cache[instance_id]
-        # Fallback to instance record if still active
-        if instance_id in self._instances:
-            return float(self._instances[instance_id].get("last_reward", 0.0))
-        # Instance never existed or was released without reward
-        LOGGER.warning(f"No reward found for instance {instance_id[:8]}, returning 0.0")
-        return 0.0
+        # Fallback to instance record
+        return float(record.get("last_reward", 0.0))
 
     async def release(self, instance_id: str, **kwargs) -> None:  # noqa: D401
         """Release a sandbox instance by killing it.
@@ -1084,6 +1105,7 @@ class SWEbenchSandboxTool(BaseTool):
         reward = 1.0 if resolved else 0.0
         status = "passed" if resolved else "failed"
         record["last_reward"] = reward
+        record["evaluation_completed"] = True  # Mark evaluation as completed
         # Cache reward separately to survive race conditions when multiple tools release the same instance
         self._reward_cache[instance_id] = reward
 
