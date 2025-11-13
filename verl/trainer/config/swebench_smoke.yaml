@@ -14,7 +14,7 @@ data:
   train_files: ${oc.env:RL_DIR}/train.parquet
   val_files: ${oc.env:RL_DIR}/val.parquet
   return_raw_chat: True
-  train_batch_size: 1
+  train_batch_size: 2
   train_max_samples: 8
   val_max_samples: 8
   max_prompt_length: 25000
@@ -27,7 +27,7 @@ algorithm:
 actor_rollout_ref:
   hybrid_engine: True
   model:
-    path: ${oc.env:SWEBENCH_MODEL,meta-llama/Llama-3.1-70B-Instruct}
+    path: ${oc.env:SWEBENCH_MODEL,Qwen/Qwen3-32B}
     use_remove_padding: True
     enable_activation_offload: False
   actor:

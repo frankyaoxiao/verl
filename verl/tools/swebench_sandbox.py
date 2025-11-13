@@ -794,9 +794,11 @@ class SWEbenchSandboxTool(BaseTool):
             )
             stage_logs.append(self._format_stage("Patch apply", patch_apply))
 
+            # Rewrite /testbed paths in eval_script to match our template's repo_path
+            eval_script = test_spec.eval_script.replace("/testbed", self.repo_path)
             eval_result = self._run_script(
                 sandbox,
-                script_content=test_spec.eval_script,
+                script_content=eval_script,
                 remote_name="run_eval.sh",
                 timeout=self.eval_timeout_seconds,
                 stage_name="Evaluation",
@@ -806,7 +808,12 @@ class SWEbenchSandboxTool(BaseTool):
             stage_logs.append(self._format_stage("Evaluation", eval_result))
             eval_log = self._collect_output(eval_result)
 
+        # Check both exit code AND test output for failures
         resolved = eval_result.exit_code == 0
+        output = (eval_result.stdout or "") + (eval_result.stderr or "")
+        if "FAILED" in output and ("failures=" in output or "errors=" in output):
+            resolved = False
+            
         status = "passed" if resolved else "failed"
         reward = 1.0 if resolved else 0.0
         stage_logs.append("## Evaluation summary")
@@ -1006,8 +1013,8 @@ class SWEbenchSandboxTool(BaseTool):
         )
         stage_logs.append(self._format_stage("Patch apply", patch_apply))
 
-        # Re-target eval script to use the worktree path as repo directory
-        eval_script = test_spec.eval_script.replace(self.repo_path, repo_path)
+        # Rewrite /testbed paths in eval_script to match our template's repo_path
+        eval_script = test_spec.eval_script.replace("/testbed", repo_path)
         eval_result = self._run_script(
             sandbox,
             script_content=eval_script,
@@ -1020,7 +1027,12 @@ class SWEbenchSandboxTool(BaseTool):
         stage_logs.append(self._format_stage("Evaluation", eval_result))
         eval_log = self._collect_output(eval_result)
 
+        # Check both exit code AND test output for failures
         resolved = eval_result.exit_code == 0
+        output = (eval_result.stdout or "") + (eval_result.stderr or "")
+        if "FAILED" in output and ("failures=" in output or "errors=" in output):
+            resolved = False
+            
         status = "passed" if resolved else "failed"
         reward = 1.0 if resolved else 0.0
         record["last_reward"] = reward
@@ -1088,7 +1100,8 @@ class SWEbenchSandboxTool(BaseTool):
         )
         stage_logs.append(self._format_stage("Git status", git_status))
 
-        eval_script = test_spec.eval_script
+        # Rewrite /testbed paths in eval_script to match our template's repo_path
+        eval_script = test_spec.eval_script.replace("/testbed", self.repo_path)
 
         eval_result = self._run_script(
             sandbox,
@@ -1101,7 +1114,17 @@ class SWEbenchSandboxTool(BaseTool):
         )
         stage_logs.append(self._format_stage("Evaluation", eval_result))
 
+        # Check both exit code AND test output for failures
+        # SWEbench eval scripts sometimes have cleanup commands that succeed
+        # after tests fail, overwriting the exit code
         resolved = eval_result.exit_code == 0
+        output = (eval_result.stdout or "") + (eval_result.stderr or "")
+        
+        # Detect test failures in output
+        if "FAILED" in output and ("failures=" in output or "errors=" in output):
+            LOGGER.warning(f"[EVAL] {instance_id[:8]} - Detected test failure in output despite exit_code={eval_result.exit_code}")
+            resolved = False
+        
         reward = 1.0 if resolved else 0.0
         status = "passed" if resolved else "failed"
         record["last_reward"] = reward

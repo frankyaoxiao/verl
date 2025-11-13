@@ -27,17 +27,20 @@ from swebench.harness.test_spec.test_spec import make_test_spec, TestSpec
 
 DEFAULT_DATASET = "MariusHobbhahn/swe-bench-verified-mini"
 _REPO_ROOT = os.getenv("SWEBENCH_REPO_PATH", "/workspace/testbed")
-SYSTEM_PROMPT = (
-    "You are an autonomous software engineer tasked with resolving issues in real-world repositories. "
-    "Your workspace is a persistent SWEbench sandbox with two tools available:\n"
-    "- `bash`: run shell commands (e.g., inspect files, run tests). Each command starts fresh in the repository root "
-    f"({_REPO_ROOT}), so use `cd dir && command` if you need to work in subdirectories.\n"
-    "- `submit_solution`: run the official SWEbench judge against the current repository state. Only call this when you "
-    "are confident in your fix—the judge will end the sandbox session.\n\n"
-    "Important: Shell state (like the current directory) doesn't persist between commands, but file changes do.\n\n"
-    "You have a maximum of 6 turns to solve the issue. Plan your approach efficiently and call `submit_solution` before running out of turns.\n\n"
-    "Think carefully, plan your next action, and iteratively refine your solution until the tests pass."
-)
+
+def _build_system_prompt(max_turns: int) -> str:
+    """Build system prompt with actual max_turns."""
+    return (
+        "You are an autonomous software engineer tasked with resolving issues in real-world repositories. "
+        "Your workspace is a persistent SWEbench sandbox with two tools available:\n"
+        "- `bash`: run shell commands (e.g., inspect files, run tests). Each command starts fresh in the repository root "
+        f"({_REPO_ROOT}), so use `cd dir && command` if you need to work in subdirectories.\n"
+        "- `submit_solution`: run the official SWEbench judge against the current repository state. Only call this when you "
+        "are confident in your fix—the judge will end the sandbox session.\n\n"
+        "Important: Shell state (like the current directory) doesn't persist between commands, but file changes do.\n\n"
+        f"You have a maximum of {max_turns} turns to solve the issue. Plan your approach efficiently and call `submit_solution` before running out of turns.\n\n"
+        "Think carefully, plan your next action, and iteratively refine your solution until the tests pass."
+    )
 USER_PROMPT_TEMPLATE = """Repository: {repo}
 Base commit: {base_commit}
 Environment setup commit: {environment_commit}
@@ -54,9 +57,12 @@ Fail-to-pass tests:
 Pass-to-pass tests:
 {pass_to_pass}
 
+Testing:
+{test_command_info}
+
 Instructions:
 - Analyse the repository state and reason step by step.
-- Use the `bash` tool to run shell commands and explore the sandbox (e.g., `ls`, `cat`, `pytest`).
+- Use the `bash` tool to run shell commands and explore the sandbox (e.g., `ls`, `cat`).
 - Call `submit_solution` only when you believe the fix is ready; this runs the SWEbench judge on the current repository and ends the session.
 - Provide unified diff patches when you believe the issue is resolved.
 """
@@ -66,6 +72,53 @@ Instructions:
 class DatasetSplit:
     train: Dataset
     val: Dataset
+
+
+def _extract_test_command(eval_script: str) -> str:
+    """Extract the actual test command from the eval_script.
+    
+    Looks for patterns like:
+    - ./tests/runtests.py (Django)
+    - python -m pytest
+    - pytest
+    - tox
+    etc.
+    """
+    import re
+    
+    # Common test command patterns
+    patterns = [
+        r'(\.\/tests\/runtests\.py[^\n]*)',  # Django style
+        r'(python -m pytest[^\n]*)',
+        r'(pytest[^\n]*)',
+        r'(python -m unittest[^\n]*)',
+        r'(tox[^\n]*)',
+        r'(python setup\.py test[^\n]*)',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, eval_script)
+        if match:
+            cmd = match.group(1).strip()
+            # Clean up any shell artifacts
+            cmd = cmd.rstrip(';').rstrip('&').strip()
+            return cmd
+    
+    # Fallback: if no pattern matched, look for any line that looks like a test command
+    for line in eval_script.split('\n'):
+        line = line.strip()
+        if any(keyword in line.lower() for keyword in ['test', 'pytest', 'runtests']):
+            if line and not line.startswith('#') and not line.startswith('export'):
+                # Try to extract the actual command
+                if '&&' in line:
+                    parts = line.split('&&')
+                    for part in parts:
+                        part = part.strip()
+                        if any(kw in part.lower() for kw in ['test', 'pytest', 'runtests']):
+                            return part.rstrip(';').rstrip('&').strip()
+                return line.rstrip(';').rstrip('&').strip()
+    
+    return "See the evaluation script for test commands"
 
 
 def _format_section(title: str, items: Iterable[str]) -> str:
@@ -79,6 +132,18 @@ def _build_user_prompt(example: dict[str, Any]) -> str:
     hints = example.get("hints_text") or "(none provided)"
     fail_to_pass = _format_section("Fail-to-pass tests", example.get("FAIL_TO_PASS", []))
     pass_to_pass = _format_section("Pass-to-pass tests", example.get("PASS_TO_PASS", []))
+    
+    # Extract test command from eval_script
+    test_command_info = "Test command information not available"
+    try:
+        test_spec: TestSpec = make_test_spec(example)
+        eval_script = test_spec.eval_script if hasattr(test_spec, 'eval_script') else None
+        if eval_script:
+            test_cmd = _extract_test_command(eval_script)
+            test_command_info = f"When `submit_solution` is called, tests will be evaluated using:\n  {test_cmd}\nYou can run this command manually via `bash` to verify your fix before submitting."
+    except Exception as e:
+        # If we can't extract the test command, use a generic message
+        test_command_info = "Tests will be run automatically when you call `submit_solution`"
 
     # Replace placeholders in template
     prompt = USER_PROMPT_TEMPLATE.format(
@@ -89,15 +154,16 @@ def _build_user_prompt(example: dict[str, Any]) -> str:
         hints=hints,
         fail_to_pass=fail_to_pass,
         pass_to_pass=pass_to_pass,
+        test_command_info=test_command_info,
     )
     return prompt.strip()
 
 
-def build_chat_messages(example: dict[str, Any]) -> list[dict[str, str]]:
+def build_chat_messages(example: dict[str, Any], max_turns: int = 6) -> list[dict[str, str]]:
     """Create chat template compatible messages for verl."""
 
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": _build_system_prompt(max_turns)},
         {"role": "user", "content": _build_user_prompt(example)},
     ]
 
@@ -164,12 +230,12 @@ def build_extra_info(example: dict[str, Any], split: str, idx: int) -> dict[str,
     return extra_info
 
 
-def build_record(example: dict[str, Any], split: str, idx: int, data_source: str) -> dict[str, Any]:
+def build_record(example: dict[str, Any], split: str, idx: int, data_source: str, max_turns: int = 6) -> dict[str, Any]:
     """Transform a HuggingFace SWE-bench example into verl RLHF row."""
 
     record = {
         "data_source": data_source,
-        "prompt": build_chat_messages(example),
+        "prompt": build_chat_messages(example, max_turns=max_turns),
         "ability": "software_engineering",
         "reward_model": {"style": "tool", "name": "swebench_sandbox"},
         "extra_info": build_extra_info(example, split, idx),
@@ -196,12 +262,12 @@ def split_dataset(dataset: Dataset, val_ratio: float, seed: int) -> DatasetSplit
     return DatasetSplit(train=train_dataset, val=val_dataset)
 
 
-def convert_split(split_name: str, dataset: Dataset, data_source: str) -> list[dict[str, Any]]:
+def convert_split(split_name: str, dataset: Dataset, data_source: str, max_turns: int = 6) -> list[dict[str, Any]]:
     """Convert a HuggingFace dataset split into RLHF-compatible records."""
 
     rows = []
     for idx, example in enumerate(dataset):
-        rows.append(build_record(example, split_name, idx, data_source))
+        rows.append(build_record(example, split_name, idx, data_source, max_turns=max_turns))
     return rows
 
 
@@ -218,6 +284,7 @@ def run_conversion(
     val_ratio: float,
     seed: int,
     sample_limit: int | None = None,
+    max_turns: int = 6,
 ) -> None:
     """Main driver to convert SWEbench dataset into verl parquet files."""
 
@@ -227,8 +294,8 @@ def run_conversion(
 
     split = split_dataset(raw_dataset, val_ratio, seed)
 
-    train_records = convert_split("train", split.train, dataset_name)
-    val_records = convert_split("val", split.val, dataset_name)
+    train_records = convert_split("train", split.train, dataset_name, max_turns=max_turns)
+    val_records = convert_split("val", split.val, dataset_name, max_turns=max_turns)
 
     save_parquet(train_records, output_dir / "train.parquet")
     save_parquet(val_records, output_dir / "val.parquet")
@@ -255,18 +322,26 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional cap on number of samples to process (useful for smoke tests).",
     )
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=6,
+        help="Maximum assistant turns allowed in the prompt (default: 6).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir).expanduser()
+    max_turns = getattr(args, 'max_turns', 6)  # Handle both max-turns and max_turns
     run_conversion(
         dataset_name=args.dataset,
         output_dir=output_dir,
         val_ratio=args.val_ratio,
         seed=args.seed,
         sample_limit=args.sample_limit,
+        max_turns=max_turns,
     )
 
 
